@@ -19,6 +19,9 @@ _RESERVED = {"meta.json", "notes.txt"}
 # Older FromSave versions wrapped a copied save folder in save_data/. Other save
 # managers keep it under its real name, which is what new slots now do.
 _LEGACY_DATA_DIR = "save_data"
+# Hidden file that marks a directory inside a profile as an organising folder rather
+# than a save slot. Slots from other save managers never have it, so they stay slots.
+_FOLDER_MARKER = ".fromsave_folder"
 _GAME_CONFIG = "game.json"
 _BACKUPS_DIR = "_backups"
 _RUN_BACKUPS_DIR = "_run_backups"
@@ -75,6 +78,15 @@ class SaveSlot:
     save_file: Optional[str]  # None for folder/files modes
     video_url: str = ""
     data_dir_name: Optional[str] = None  # folder-mode slots: name of the saved folder
+    folder: str = ""  # name of the organising folder holding this slot, "" if none
+
+
+@dataclass
+class SaveFolder:
+    """A folder inside a profile that groups slots. It is not a save itself."""
+    name: str
+    path: Path
+    slots: list[SaveSlot] = field(default_factory=list)
 
 
 # JSON helpers
@@ -229,21 +241,37 @@ def slot_save_files(slot: SaveSlot) -> list[Path]:
     return [f for f in slot.path.iterdir() if _is_save_file(f)]
 
 
+def _is_folder_dir(path: Path) -> bool:
+    return path.is_dir() and (path / _FOLDER_MARKER).exists()
+
+
+def _read_folder_slots(folder_dir: Path, game: str, profile: str) -> list[SaveSlot]:
+    slots = []
+    for slot_dir in sorted(folder_dir.iterdir()):
+        if slot_dir.is_dir() and (slot := _read_slot(slot_dir, game, profile)):
+            slot.folder = folder_dir.name if _is_folder_dir(folder_dir) else ""
+            slots.append(slot)
+    return slots
+
+
 def load_slots(game: str, profile: str) -> list[SaveSlot]:
+    """Every slot of a profile, including the ones inside folders (names are unique)."""
     profile_dir = SAVES_DIR / game / profile
     if not profile_dir.exists():
         return []
     slots = []
-    for slot_dir in sorted(profile_dir.iterdir()):
-        if slot_dir.is_dir() and (slot := _read_slot(slot_dir, game, profile)):
+    for entry in sorted(profile_dir.iterdir()):
+        if not entry.is_dir():
+            continue
+        if _is_folder_dir(entry):
+            slots.extend(_read_folder_slots(entry, game, profile))
+        elif slot := _read_slot(entry, game, profile):
             slots.append(slot)
     logger.debug("Loaded %d slot(s) for game=%r profile=%r", len(slots), game, profile)
     return slots
 
 
-def load_sorted_slots(game: str, profile: str, sort: str, desc: bool) -> list[SaveSlot]:
-    """Load slots in display order. Custom order is re-saved so it tracks added/removed slots."""
-    slots = load_slots(game, profile)
+def _sort_slots(slots: list[SaveSlot], sort: str, desc: bool, order: dict[str, int]) -> None:
     if sort == "name":
         slots.sort(key=lambda s: s.name.lower(), reverse=desc)
     elif sort == "created":
@@ -251,10 +279,142 @@ def load_sorted_slots(game: str, profile: str, sort: str, desc: bool) -> list[Sa
     elif sort == "modified":
         slots.sort(key=lambda s: s.date_modified or s.date_created or datetime.min, reverse=desc)
     elif sort == "custom":
-        order = {name: i for i, name in enumerate(load_slot_order(game, profile))}
         slots.sort(key=lambda s: order.get(s.name, len(order)))
+
+
+def load_sorted_slots(game: str, profile: str, sort: str, desc: bool) -> list[SaveSlot]:
+    """Load slots in display order. Custom order is re-saved so it tracks added/removed slots."""
+    slots = load_slots(game, profile)
+    order = {name: i for i, name in enumerate(load_slot_order(game, profile))}
+    _sort_slots(slots, sort, desc, order)
+    if sort == "custom":
         save_slot_order(game, profile, [s.name for s in slots])
     return slots
+
+
+def load_profile_tree(game: str, profile: str, sort: str,
+                      desc: bool) -> tuple[list[SaveFolder], list[SaveSlot]]:
+    """A profile as (folders, slots not in any folder), each sorted in display order.
+
+    Folders come first. They are ordered by name (or by the custom order); slots are
+    ordered by the chosen sort, inside folders as well as at the top level.
+    """
+    profile_dir = SAVES_DIR / game / profile
+    folders: list[SaveFolder] = []
+    loose: list[SaveSlot] = []
+    if not game or not profile or not profile_dir.exists():
+        return folders, loose
+    for entry in sorted(profile_dir.iterdir()):
+        if not entry.is_dir():
+            continue
+        if _is_folder_dir(entry):
+            folders.append(SaveFolder(entry.name, entry, _read_folder_slots(entry, game, profile)))
+        elif slot := _read_slot(entry, game, profile):
+            loose.append(slot)
+
+    order = {name: i for i, name in enumerate(load_slot_order(game, profile))}
+    for folder in folders:
+        _sort_slots(folder.slots, sort, desc, order)
+    _sort_slots(loose, sort, desc, order)
+    if sort == "custom":
+        folders.sort(key=lambda f: order.get(f.name, len(order)))
+    else:
+        folders.sort(key=lambda f: f.name.lower(), reverse=desc and sort == "name")
+    if sort == "custom":
+        save_tree_order(game, profile, folders, loose)
+    return folders, loose
+
+
+def save_tree_order(game: str, profile: str, folders: list[SaveFolder],
+                    loose: list[SaveSlot]) -> None:
+    """Persist the custom order. Names are unique per profile, so one flat list covers
+    folders, the slots inside them and top-level slots."""
+    names = []
+    for folder in folders:
+        names.append(folder.name)
+        names.extend(s.name for s in folder.slots)
+    names.extend(s.name for s in loose)
+    save_slot_order(game, profile, names)
+
+
+# Folders. They only organise slots: a folder is never loaded into the game, and a
+# slot lives directly in its profile or in exactly one folder (no nesting).
+
+def _profile_names(game: str, profile: str) -> set[str]:
+    """Lower-cased names already used by slots and folders anywhere in a profile."""
+    profile_dir = SAVES_DIR / game / profile
+    names: set[str] = set()
+    if not profile_dir.exists():
+        return names
+    for entry in profile_dir.iterdir():
+        if not entry.is_dir():
+            continue
+        names.add(entry.name.lower())
+        if _is_folder_dir(entry):
+            names.update(d.name.lower() for d in entry.iterdir() if d.is_dir())
+    return names
+
+
+def name_taken(game: str, profile: str, name: str, ignore: str = "") -> bool:
+    """Whether a slot or folder called `name` exists in the profile (case-insensitive).
+    `ignore` is the entry's own current name, for renames."""
+    names = _profile_names(game, profile)
+    if ignore:
+        names.discard(ignore.lower())
+    return name.lower() in names
+
+
+def create_folder(game: str, profile: str, name: str) -> SaveFolder:
+    name = validate_entry_name(name)
+    if name_taken(game, profile, name):
+        raise ValueError(f"'{name}' already exists in this profile")
+    logger.info("Creating folder: game=%r profile=%r folder=%r", game, profile, name)
+    path = SAVES_DIR / game / profile / name
+    path.mkdir(parents=True, exist_ok=False)
+    (path / _FOLDER_MARKER).write_text("", encoding="utf-8")
+    return SaveFolder(name, path, [])
+
+
+def rename_folder(game: str, profile: str, old_name: str, new_name: str) -> None:
+    new_name = validate_entry_name(new_name)
+    if name_taken(game, profile, new_name, ignore=old_name):
+        raise ValueError(f"'{new_name}' already exists in this profile")
+    logger.info("Renaming folder: game=%r profile=%r %r -> %r", game, profile, old_name, new_name)
+    profile_dir = SAVES_DIR / game / profile
+    (profile_dir / old_name).rename(profile_dir / new_name)
+    order = load_slot_order(game, profile)
+    if old_name in order:
+        save_slot_order(game, profile, [new_name if n == old_name else n for n in order])
+
+
+def delete_empty_folder(game: str, profile: str, name: str) -> None:
+    """Remove a folder, but only if it holds no slots."""
+    path = SAVES_DIR / game / profile / name
+    if not _is_folder_dir(path):
+        raise ValueError(f"'{name}' is not a folder")
+    if any(d.is_dir() for d in path.iterdir()):
+        raise ValueError("Only empty folders can be deleted")
+    logger.info("Deleting empty folder: game=%r profile=%r folder=%r", game, profile, name)
+    shutil.rmtree(path)
+
+
+def move_slot_to_folder(slot: SaveSlot, folder: str) -> SaveSlot:
+    """Move a slot into a folder of its profile, or out to the top level if folder is ""."""
+    profile_dir = SAVES_DIR / slot.game / slot.profile
+    target_parent = profile_dir / folder if folder else profile_dir
+    if folder and not _is_folder_dir(target_parent):
+        raise ValueError(f"'{folder}' is not a folder")
+    if slot.path.parent == target_parent:
+        return slot
+    new_path = target_parent / slot.name
+    if new_path.exists():
+        raise ValueError(f"'{slot.name}' already exists there")
+    logger.info("Moving slot: game=%r profile=%r %r/%r -> %r",
+                slot.game, slot.profile, slot.folder, slot.name, folder)
+    slot.path.rename(new_path)
+    slot.path = new_path
+    slot.folder = folder
+    return slot
 
 
 def _guess_timestamps(slot_dir: Path, data_dir: Optional[Path]) -> tuple[datetime, datetime]:
@@ -358,37 +518,47 @@ def delete_slot(slot: SaveSlot, soft: bool = False) -> None:
         shutil.rmtree(slot.path)
 
 
-def _unique_name(folder: Path, base: str) -> str:
+def _unique_name(game: str, profile: str, base: str) -> str:
     name, n = base, 2
-    while (folder / name).exists():
+    while name_taken(game, profile, name):
         name = f"{base} {n}"
         n += 1
     return name
 
 
 def auto_slot_name(game: str, profile: str) -> str:
-    return _unique_name(SAVES_DIR / game / profile, "new save")
+    return _unique_name(game, profile, "new save")
 
 
 def duplicate_slot_name(game: str, profile: str, original_name: str) -> str:
-    return _unique_name(SAVES_DIR / game / profile, f"{original_name} copy")
+    return _unique_name(game, profile, f"{original_name} copy")
 
 
-def copy_slot_to_profile(slot: SaveSlot, target_profile: str, new_name: str) -> SaveSlot:
-    """Copy a slot (with its notes) into a profile of the same game, with fresh timestamps."""
+def copy_slot_to_profile(slot: SaveSlot, target_profile: str, new_name: str,
+                         folder: str = "") -> SaveSlot:
+    """Copy a slot (with its notes) into a profile of the same game, with fresh timestamps.
+
+    The copy lands at the top level of the target profile, or in `folder` if given.
+    """
     logger.info("Copying slot: game=%r %r/%r -> %r/%r",
                 slot.game, slot.profile, slot.name, target_profile, new_name)
-    new_dir = SAVES_DIR / slot.game / target_profile / new_name
+    target_dir = SAVES_DIR / slot.game / target_profile
+    if folder:
+        target_dir = target_dir / folder
+    new_dir = target_dir / new_name
     shutil.copytree(slot.path, new_dir)
     meta_file = new_dir / "meta.json"
     if meta_file.exists():  # only slots that already track timestamps keep doing so
         now = datetime.now()
         _update_meta(meta_file, _timestamps(now, now))
-    return _read_slot(new_dir, slot.game, target_profile)
+    copy = _read_slot(new_dir, slot.game, target_profile)
+    copy.folder = folder
+    return copy
 
 
 def duplicate_slot(slot: SaveSlot, new_name: str) -> SaveSlot:
-    return copy_slot_to_profile(slot, slot.profile, new_name)
+    """Copy a slot next to the original, in the same folder."""
+    return copy_slot_to_profile(slot, slot.profile, new_name, folder=slot.folder)
 
 
 def load_slot_order(game: str, profile: str) -> list[str]:
