@@ -16,9 +16,11 @@ import api_server
 import config
 import storage
 from hotkeys import GlobalHotkeyListener, GlobalTextInputListener, is_wayland_session
+from ui.add_game_dialog import AddGameDialog
 from ui.configure_game_dialog import ConfigureGameDialog
 from ui.overlay_window import OverlayWindow
 from ui.profiles_dialog import ProfilesDialog
+from ui.save_path_widgets import split_paths
 from ui.settings_dialog import SettingsDialog
 from ui.update_flow import UpdateFlow
 from ui.video_player import InlineVideoPlayer
@@ -27,6 +29,7 @@ logger = logging.getLogger(__name__)
 
 _UI_DIR = Path(__file__).parent
 _SORT_LABELS = {"modified": "Modified", "created": "Created", "name": "Name", "custom": "Custom"}
+
 
 def _hotkey_label(key: str) -> str:
     if not key:
@@ -45,9 +48,11 @@ def _fix_combo_first_click(combo: QComboBox) -> None:
     With the stylesheet applied, the popup's item geometry shifts just after it
     opens, so the first click could land on the wrong row (or none).
     """
+
     def _select_and_close(index) -> None:
         combo.setCurrentIndex(index.row())
         combo.hidePopup()
+
     combo.view().pressed.connect(_select_and_close)
 
 
@@ -70,6 +75,8 @@ class MainWindow(QMainWindow):
         self._slots: list[storage.SaveSlot] = []
         self._current_slot: Optional[storage.SaveSlot] = None
         self._actual_video_url: str = ""
+        self._collapsed_groups: set[str] = set()
+        self._row_to_slot: dict[int, Optional[storage.SaveSlot]] = {}
 
         self._notes_save_timer = QTimer(self)
         self._notes_save_timer.setSingleShot(True)
@@ -106,10 +113,8 @@ class MainWindow(QMainWindow):
         self._overlay_action_hotkeys = GlobalHotkeyListener(self)
         self._overlay_action_hotkeys.triggered.connect(self._on_overlay_hotkey)
 
-        # The overlay's rename and import prompts share one text listener.
         self._overlay_text_mode: str = "rename"  # "rename" | "import"
         self._overlay_rename_input = GlobalTextInputListener(self)
-        # No parent, so minimizing the main window doesn't hide the overlay.
         self._overlay = OverlayWindow(on_moved=self._on_overlay_moved)
         self._overlay_rename_input.text_changed.connect(self._overlay.set_rename_text)
         self._overlay_rename_input.submitted.connect(self._on_overlay_text_submitted)
@@ -147,8 +152,6 @@ class MainWindow(QMainWindow):
         self._startup_update = UpdateFlow(self, quiet=True)
         if self._config.check_updates_on_startup:
             QTimer.singleShot(0, self._startup_update.start)
-
-    # UI construction
 
     def _build_ui(self) -> None:
         root = QWidget()
@@ -197,14 +200,20 @@ class MainWindow(QMainWindow):
         bar.addWidget(game_label)
 
         self.game_combo = QComboBox()
-        self.game_combo.setMinimumWidth(220)
-        self.game_combo.setMaximumWidth(320)
+        self.game_combo.setMinimumWidth(180)
+        self.game_combo.setMaximumWidth(280)
         self.game_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.game_combo.currentIndexChanged.connect(self._on_game_changed)
         _fix_combo_first_click(self.game_combo)
         bar.addWidget(self.game_combo)
 
-        bar.addSpacing(12)
+        self.add_game_btn = QPushButton("+ Add game")
+        self.add_game_btn.setObjectName("ghostBtn")
+        self.add_game_btn.setToolTip("Add a new game")
+        self.add_game_btn.clicked.connect(self._on_add_game)
+        bar.addWidget(self.add_game_btn)
+
+        bar.addSpacing(8)
 
         profile_label = QLabel("Profile")
         profile_label.setObjectName("fieldLabel")
@@ -224,6 +233,12 @@ class MainWindow(QMainWindow):
         self.manage_profiles_btn.setToolTip("Manage profiles")
         self.manage_profiles_btn.clicked.connect(self._on_manage_profiles)
         bar.addWidget(self.manage_profiles_btn)
+
+        self.new_group_btn = QPushButton("New group")
+        self.new_group_btn.setObjectName("ghostBtn")
+        self.new_group_btn.setToolTip("Create a collapsible save group")
+        self.new_group_btn.clicked.connect(self._on_new_group)
+        bar.addWidget(self.new_group_btn)
 
         bar.addStretch()
 
@@ -281,158 +296,79 @@ class MainWindow(QMainWindow):
         self.slot_list.model().rowsMoved.connect(self._on_rows_moved)
         self.slot_list.setContextMenuPolicy(Qt.CustomContextMenu)
         self.slot_list.customContextMenuRequested.connect(self._on_slot_context_menu)
+        self.slot_list.itemClicked.connect(self._on_list_item_clicked)
         self.slot_list.installEventFilter(self)
         layout.addWidget(self.slot_list, 1)
 
         return panel
 
-    def _build_info_panel(self) -> QWidget:
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        scroll.setFrameShape(QFrame.NoFrame)
+    def _list_item_kind(self, item: QListWidgetItem) -> str:
+        return item.data(Qt.UserRole + 1) or "slot"
 
-        panel = QWidget()
-        layout = QVBoxLayout(panel)
-        layout.setContentsMargins(8, 0, 8, 0)
-        layout.setSpacing(0)
+    def _on_list_item_clicked(self, item: QListWidgetItem) -> None:
+        if self._list_item_kind(item) != "group":
+            return
+        group = item.data(Qt.UserRole + 2) or ""
+        if group in self._collapsed_groups:
+            self._collapsed_groups.remove(group)
+        else:
+            self._collapsed_groups.add(group)
+        self._reload_slots(self._current_slot_name())
 
-        lbl = QLabel("Slot details")
-        lbl.setObjectName("panelHeader")
-        layout.addWidget(lbl)
-        layout.addSpacing(10)
+    def _group_label(self, name: str, expanded: bool) -> str:
+        return f"▾ {name}" if expanded and name else f"▸ {name}" if name else "Ungrouped"
 
-        name_row = QHBoxLayout()
-        self.detail_name = QLabel("—")
-        self.detail_name.setObjectName("detailName")
-        name_row.addWidget(self.detail_name, 1)
-        self.rename_btn = QPushButton("Rename")
-        self.rename_btn.setObjectName("ghostBtn")
-        self.rename_btn.setEnabled(False)
-        self.rename_btn.clicked.connect(self._on_rename_slot)
-        name_row.addWidget(self.rename_btn)
-        layout.addLayout(name_row)
+    def _on_add_game(self) -> None:
+        dlg = AddGameDialog(self)
+        if not dlg.exec():
+            return
+        name, mode, path_text = dlg.result or ("", "", "")
+        if not name:
+            return
+        if any(g.name == name for g in self._games):
+            self._notify(f"A game named '{name}' already exists.")
+            return
+        try:
+            cfg = storage.GameConfig(
+                name=name,
+                save_path=path_text.strip() if mode != "files" else "",
+                save_mode=mode,
+                save_paths=split_paths(path_text) if mode == "files" else [],
+            )
+            storage.save_game_config(cfg)
+        except Exception as exc:
+            logger.exception("Add game failed: %r", name)
+            self._notify(f"Add game failed: {exc}")
+            return
+        self._games = storage.load_games()
+        self._load_data(name)
+        self._notify(f"Added game '{name}'.")
 
-        self.detail_time = QLabel("—")
-        self.detail_time.setObjectName("mutedLabel")
-        layout.addWidget(self.detail_time)
-
-        layout.addSpacing(16)
-
-        notes_lbl = QLabel("Notes")
-        notes_lbl.setObjectName("fieldLabel")
-        layout.addWidget(notes_lbl)
-        layout.addSpacing(4)
-
-        self.detail_notes = QPlainTextEdit()
-        self.detail_notes.setObjectName("detailNotes")
-        self.detail_notes.setPlaceholderText("No notes.")
-        self.detail_notes.setMaximumHeight(90)
-        self.detail_notes.textChanged.connect(self._on_notes_changed)
-        layout.addWidget(self.detail_notes)
-
-        layout.addSpacing(16)
-
-        video_lbl = QLabel("Video")
-        video_lbl.setObjectName("fieldLabel")
-        layout.addWidget(video_lbl)
-        layout.addSpacing(4)
-
-        video_row = QHBoxLayout()
-        video_row.setSpacing(6)
-        self.detail_video_url = QLineEdit()
-        self.detail_video_url.setObjectName("detailVideoUrl")
-        self.detail_video_url.setPlaceholderText("YouTube or direct video URL")
-        self.detail_video_url.textChanged.connect(self._on_video_changed)
-        video_row.addWidget(self.detail_video_url, 1)
-
-        self.browse_video_btn = QPushButton("Browse")
-        self.browse_video_btn.setObjectName("ghostBtn")
-        self.browse_video_btn.clicked.connect(self._on_browse_video)
-        video_row.addWidget(self.browse_video_btn)
-
-        self.clear_video_btn = QPushButton("Clear")
-        self.clear_video_btn.setObjectName("ghostBtn")
-        self.clear_video_btn.setEnabled(False)
-        self.clear_video_btn.clicked.connect(self._on_clear_video)
-        video_row.addWidget(self.clear_video_btn)
-        layout.addLayout(video_row)
-
-        self._inline_player = InlineVideoPlayer()
-        self._inline_player.setVisible(False)
-        layout.addWidget(self._inline_player)
-
-        layout.addSpacing(16)
-
-        info_box = QFrame()
-        info_box.setObjectName("infoBox")
-        info_layout = QVBoxLayout(info_box)
-        info_layout.setContentsMargins(12, 10, 12, 10)
-        info_layout.setSpacing(6)
-
-        info_title = QLabel("Game info")
-        info_title.setObjectName("fieldLabel")
-        info_layout.addWidget(info_title)
-
-        self.info_save_path = _InfoRow("Save path", "—")
-        self.info_created = _InfoRow("Created", "—")
-        self.info_modified = _InfoRow("Modified", "—")
-        self.info_file_size = _InfoRow("File size", "—")
-        self.info_ro_status = _InfoRow("Practice", "—")
-
-        for row in (self.info_save_path, self.info_created, self.info_modified, self.info_file_size, self.info_ro_status):
-            info_layout.addWidget(row)
-
-        layout.addWidget(info_box)
-        layout.addStretch()
-
-        scroll.setWidget(panel)
-        return scroll
-
-    def _build_action_bar(self) -> QHBoxLayout:
-        bar = QHBoxLayout()
-        bar.setSpacing(6)
-
-        self.import_btn = QPushButton(_btn_text("Import Save", self._config.hotkey_import))
-        self.import_btn.setObjectName("primaryBtn")
-        self.import_btn.clicked.connect(self._on_import_save)
-
-        self.replace_btn = QPushButton("Replace Save")
-        self.replace_btn.clicked.connect(self._on_replace_save)
-
-        self.load_btn = QPushButton(_btn_text("Load Save", self._config.hotkey_load))
-        self.load_btn.clicked.connect(self._on_load_save)
-
-        self.delete_btn = QPushButton("Delete slot")
-        self.delete_btn.setObjectName("dangerBtn")
-        self.delete_btn.clicked.connect(self._on_delete_slot)
-
-        bar.addWidget(self.import_btn)
-        bar.addWidget(self.replace_btn)
-        bar.addWidget(self.load_btn)
-        bar.addWidget(self.delete_btn)
-        bar.addStretch()
-
-        self.ro_btn = QPushButton(_btn_text("Practice Mode", self._config.hotkey_ro_toggle))
-        self.ro_btn.setObjectName("ghostBtn")
-        self.ro_btn.setCheckable(True)
-        self.ro_btn.setEnabled(False)
-        self.ro_btn.toggled.connect(self._on_ro_toggled)
-        bar.addWidget(self.ro_btn)
-
-        self.run_mode_btn = QPushButton("Run Mode")
-        self.run_mode_btn.setObjectName("ghostBtn")
-        self.run_mode_btn.setCheckable(True)
-        self.run_mode_btn.setToolTip(
-            "Disables Load Save and Practice Mode to protect the game save,\n"
-            "and takes a rolling backup every 2 minutes (keeps last 3)."
-        )
-        self.run_mode_btn.toggled.connect(self._on_run_mode_toggled)
-        bar.addWidget(self.run_mode_btn)
-
-        return bar
-
-    # Data loading
+    def _on_new_group(self) -> None:
+        game = self.game_combo.currentText()
+        profile = self.profile_combo.currentText()
+        if not game or not profile:
+            self._notify("Select a game and profile first.")
+            return
+        name, ok = QInputDialog.getText(self, "New group", "Group name:")
+        if not ok or not name.strip():
+            return
+        try:
+            name = storage.validate_entry_name(name)
+        except ValueError as e:
+            self._notify(str(e))
+            return
+        if (storage.SAVES_DIR / game / profile / name).exists():
+            self._notify(f"A group named '{name}' already exists.")
+            return
+        try:
+            storage.create_group(game, profile, name)
+        except Exception as exc:
+            logger.exception("Create group failed: %r", name)
+            self._notify(f"Group creation failed: {exc}")
+            return
+        self._reload_slots(self._current_slot_name())
+        self._notify(f"Created group '{name}'.")
 
     def _prompt_unconfigured_games(self) -> None:
         changed = False
@@ -527,7 +463,6 @@ class MainWindow(QMainWindow):
             self.profile_combo.currentText(),
             [s.name for s in self._slots],
         )
-        # Dragging drops the item widgets, so recreate them once the move settles.
         QTimer.singleShot(0, self._reattach_slot_widgets)
 
     def _reattach_slot_widgets(self) -> None:
@@ -548,18 +483,51 @@ class MainWindow(QMainWindow):
             else QAbstractItemView.NoDragDrop
         )
 
+        self._row_to_slot = {}
         with QSignalBlocker(self.slot_list):
             self.slot_list.clear()
+            if not (game_name and profile_name):
+                self._clear_detail()
+                return
+
+            groups: dict[str, list[storage.SaveSlot]] = {}
+            ungrouped: list[storage.SaveSlot] = []
             for slot in self._slots:
+                if slot.group:
+                    groups.setdefault(slot.group, []).append(slot)
+                else:
+                    ungrouped.append(slot)
+
+            ordered_groups = sorted(groups)
+            for group_name in ordered_groups:
+                header = QListWidgetItem(self._group_label(group_name, group_name not in self._collapsed_groups))
+                header.setData(Qt.UserRole + 1, "group")
+                header.setData(Qt.UserRole + 2, group_name)
+                header.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                self.slot_list.addItem(header)
+                self._row_to_slot[self.slot_list.count() - 1] = None
+                if group_name in self._collapsed_groups:
+                    continue
+                for slot in sorted(groups[group_name], key=lambda s: s.name.lower()):
+                    item = QListWidgetItem()
+                    item.setData(Qt.UserRole, slot)
+                    item.setData(Qt.UserRole + 1, "slot")
+                    item.setSizeHint(QSize(0, 34))
+                    self.slot_list.addItem(item)
+                    self.slot_list.setItemWidget(item, _SlotItem(slot.name))
+                    self._row_to_slot[self.slot_list.count() - 1] = slot
+
+            for slot in sorted(ungrouped, key=lambda s: s.name.lower()):
                 item = QListWidgetItem()
                 item.setData(Qt.UserRole, slot)
+                item.setData(Qt.UserRole + 1, "slot")
                 item.setSizeHint(QSize(0, 34))
                 self.slot_list.addItem(item)
                 self.slot_list.setItemWidget(item, _SlotItem(slot.name))
+                self._row_to_slot[self.slot_list.count() - 1] = slot
 
         if self._slots:
-            names = [s.name for s in self._slots]
-            target = names.index(select_slot) if select_slot in names else 0
+            target = next((row for row, slot in self._row_to_slot.items() if slot and slot.name == select_slot), 0)
             self.slot_list.setCurrentRow(target)
             self._on_slot_selected(target)
         else:
@@ -567,7 +535,8 @@ class MainWindow(QMainWindow):
 
     def _selected_slot(self) -> Optional[storage.SaveSlot]:
         row = self.slot_list.currentRow()
-        return self._slots[row] if 0 <= row < len(self._slots) else None
+        slot = self._row_to_slot.get(row)
+        return slot if slot is not None else None
 
     def _select_next_slot(self) -> None:
         row = self.slot_list.currentRow()
@@ -579,15 +548,16 @@ class MainWindow(QMainWindow):
         if row > 0:
             self.slot_list.setCurrentRow(row - 1)
 
-    # Event handlers
-
     def _on_slot_selected(self, row: int) -> None:
         self._flush_notes()
         self._flush_video()
-        if row < 0 or row >= len(self._slots):
+        if row < 0 or row >= self.slot_list.count():
             self._clear_detail()
             return
-        slot = self._slots[row]
+        slot = self._row_to_slot.get(row)
+        if slot is None:
+            self._clear_detail()
+            return
         self._current_slot = slot
         self.rename_btn.setEnabled(True)
         self.detail_name.setText(slot.name)
@@ -612,7 +582,7 @@ class MainWindow(QMainWindow):
             return
         game_cfg = self._get_game_cfg()
         if not game_cfg or game_cfg.name != self._guard_cfg.name:
-            return  # switching game disables practice mode separately
+            return
         try:
             storage.load_save(slot, game_cfg, make_backup=False)
         except OSError as e:
@@ -732,8 +702,6 @@ class MainWindow(QMainWindow):
 
     def _on_ro_toggled(self, checked: bool) -> None:
         if self._confirm_dialog is not None and self._confirm_action == "lock":
-            # The hotkey was pressed again while the enable confirmation is open:
-            # that means "confirm" (see _confirm), not "turn off".
             self._confirm("lock", "Practice Mode", self._LOCK_CONFIRM_MESSAGE,
                           disable_key="confirm_lock_slot")
             with QSignalBlocker(self.ro_btn):
@@ -768,7 +736,6 @@ class MainWindow(QMainWindow):
         warning_shown = False
         if not self._config.protect_warning_acknowledged and not self._protect_warning_shown:
             if self._protect_warning_open:
-                # Hotkey pressed again while the warning is open; ignore it.
                 with QSignalBlocker(self.ro_btn):
                     self.ro_btn.setChecked(True)
                 return
@@ -827,7 +794,6 @@ class MainWindow(QMainWindow):
         self._notify(f"'{label}' — practice mode is on.")
 
     def _show_protect_warning(self) -> bool:
-        """Show the one-time Practice Mode warning. Returns whether the user confirmed."""
         dlg = QDialog(self)
         dlg.setWindowTitle("Practice Mode — heads up")
         dlg.setMinimumWidth(420)
@@ -874,8 +840,6 @@ class MainWindow(QMainWindow):
     def _on_guarded_file_changed(self, path: str) -> None:
         if self._guard_slot is None or self._guard_cfg is None:
             return
-        # Stop watching so our own restore doesn't retrigger this, and give the
-        # game time to finish writing before restoring.
         self._guard_watcher.removePath(path)
         QTimer.singleShot(500, lambda: self._do_guard_restore(path))
 
@@ -911,15 +875,14 @@ class MainWindow(QMainWindow):
                 return
         self._import_as(cfg, profile, name)
 
-    def _import_as(self, cfg: storage.GameConfig, profile: str, name: str) -> bool:
-        """Import the live save as a new slot and select it. Returns whether it succeeded."""
-        if (storage.SAVES_DIR / cfg.name / profile / name).exists():
+    def _import_as(self, cfg: storage.GameConfig, profile: str, name: str, group: str = "") -> bool:
+        if (storage.SAVES_DIR / cfg.name / profile / (group + "/" if group else "") / name).exists():
             self._notify(f"A slot named '{name}' already exists.")
             return False
         try:
-            storage.import_save(cfg.name, profile, name, cfg)
+            storage.import_save(cfg.name, profile, name, cfg, group=group)
         except Exception as e:
-            logger.exception("Import save failed: game=%r profile=%r slot=%r", cfg.name, profile, name)
+            logger.exception("Import save failed: game=%r profile=%r slot=%r group=%r", cfg.name, profile, name, group)
             self._notify(f"Import failed: {e}")
             return False
         self._reload_slots(name)
@@ -928,12 +891,6 @@ class MainWindow(QMainWindow):
 
     def _confirm(self, action: str, title: str, message: str,
                  disable_key: Optional[str] = None) -> bool:
-        """Show a Yes/No dialog that the same hotkey can confirm.
-
-        If a dialog for the same action is already open, this accepts it and returns
-        False (the pending call proceeds). If disable_key is given, a "Don't ask again"
-        checkbox sets that Config field to False.
-        """
         if self._confirm_dialog is not None:
             if self._confirm_action == action:
                 btn = self._confirm_dialog.button(QMessageBox.Yes)
@@ -1010,7 +967,6 @@ class MainWindow(QMainWindow):
             self._notify(f"Load failed: {e}")
             return
 
-        # Practice Mode now protects the slot that was just loaded.
         if self._guard_cfg is not None and self._guard_cfg.name == cfg.name:
             self._guard_slot = slot
 
@@ -1021,7 +977,10 @@ class MainWindow(QMainWindow):
         if row < 0 or row >= len(self._slots):
             self.status_bar.showMessage("No slot selected.")
             return
-        slot = self._slots[row]
+        slot = self._selected_slot()
+        if slot is None:
+            self.status_bar.showMessage("No slot selected.")
+            return
         soft = self._config.soft_delete
         if self._config.confirm_delete:
             msg = (f"Move '{slot.name}' to trash?" if soft
@@ -1038,7 +997,7 @@ class MainWindow(QMainWindow):
                              slot.game, slot.profile, slot.name, soft)
             self.status_bar.showMessage(f"Delete failed: {e}")
             return
-        self._slots.pop(row)
+        self._slots.pop(self._slots.index(slot))
         with QSignalBlocker(self.slot_list):
             self.slot_list.takeItem(row)
             if self._slots:
@@ -1071,7 +1030,6 @@ class MainWindow(QMainWindow):
         self._rename_current_slot(name.strip())
 
     def _rename_current_slot(self, name: str) -> bool:
-        """Rename the selected slot and return whether a rename occurred."""
         slot = self._selected_slot()
         name = name.strip()
         if slot is None or not name or name == slot.name:
@@ -1081,7 +1039,6 @@ class MainWindow(QMainWindow):
         except ValueError as e:
             self._notify(str(e))
             return False
-        # Allow case-only renames on case-insensitive filesystems.
         if name.lower() != slot.name.lower() and (slot.path.parent / name).exists():
             self._notify(f"A slot named '{name}' already exists.")
             return False
@@ -1094,7 +1051,6 @@ class MainWindow(QMainWindow):
             return False
         game_name = self.game_combo.currentText()
         profile_name = self.profile_combo.currentText()
-        # Keep the slot's position in the custom order, even if another sort is active.
         if self._config.slot_sort == "custom" or storage.load_slot_order(game_name, profile_name):
             storage.save_slot_order(game_name, profile_name, [s.name for s in self._slots])
         self._reload_slots(name)
@@ -1102,10 +1058,7 @@ class MainWindow(QMainWindow):
         return True
 
     def _begin_overlay_text_entry(self, initial_text: str) -> bool:
-        """Show the overlay's name editor and start capturing keystrokes for it."""
         self._overlay.begin_rename(initial_text)
-        # Stop the action hotkeys first: the text listener suppresses keystrokes on
-        # Windows, so they'd miss the trigger key's release and think it's held.
         self._overlay_action_hotkeys.stop()
         if self._overlay_rename_input.start(initial_text):
             return True
@@ -1120,7 +1073,6 @@ class MainWindow(QMainWindow):
             self._begin_overlay_text_entry(slot.name)
 
     def _on_overlay_import_triggered(self) -> None:
-        """Import directly when auto-naming, otherwise ask for the name in the overlay."""
         if self._config.auto_name_imports:
             self._on_import_save()
             return
@@ -1150,7 +1102,7 @@ class MainWindow(QMainWindow):
             self._finish_overlay_text_entry()
             self._refresh_overlay()
         elif self._overlay.isVisible():
-            self._overlay_rename_input.start(name)  # keep the prompt open to fix the name
+            self._overlay_rename_input.start(name)
 
     def _on_overlay_import_requested(self, name: str) -> None:
         self._overlay_rename_input.stop()
@@ -1188,6 +1140,9 @@ class MainWindow(QMainWindow):
             return
         row = self.slot_list.row(item)
         self.slot_list.setCurrentRow(row)
+        slot = self._selected_slot()
+        if slot is None:
+            return
 
         menu = QMenu(self)
         menu.addAction("Rename", self._on_rename_slot)
@@ -1207,7 +1162,7 @@ class MainWindow(QMainWindow):
         slot = self._selected_slot()
         if slot is None:
             return
-        new_name = storage.duplicate_slot_name(slot.game, slot.profile, slot.name)
+        new_name = storage.duplicate_slot_name(slot.game, slot.profile, slot.name, slot.group)
         try:
             storage.duplicate_slot(slot, new_name)
         except Exception as e:
@@ -1334,7 +1289,6 @@ class MainWindow(QMainWindow):
             sc.setEnabled(False)
 
     def _suspend_hotkeys(self) -> None:
-        """Disable every hotkey, so pressing one while recording it in Settings does nothing."""
         self._stop_main_hotkeys()
         self._overlay_toggle_hotkey.stop()
         self._overlay_action_hotkeys.stop()
@@ -1342,7 +1296,6 @@ class MainWindow(QMainWindow):
             self._overlay_toggle_shortcut.setEnabled(False)
 
     def _restore_hotkeys(self) -> None:
-        """Re-enable hotkeys after _suspend_hotkeys(), respecting the overlay's state."""
         if self._overlay.isVisible():
             self._sync_overlay_focus_hotkeys()
         else:
@@ -1350,15 +1303,8 @@ class MainWindow(QMainWindow):
         self._apply_overlay_toggle_hotkey()
 
     def _sync_overlay_focus_hotkeys(self) -> None:
-        """While the overlay is shown, use the main hotkeys when this window is focused
-        and the overlay's global hotkeys otherwise, never both.
-
-        Both sets default to the same keys and pynput ignores focus, so running
-        both would fire each action twice.
-        """
         if not self._overlay.isVisible():
             return
-        # Minimizing doesn't always send an ActivationChange, so check it explicitly.
         if self.isActiveWindow() and not self.isMinimized():
             self._overlay_action_hotkeys.stop()
             self._apply_hotkeys()
@@ -1408,7 +1354,6 @@ class MainWindow(QMainWindow):
 
         key = self._config.hotkey_toggle_overlay
         if not self._overlay_toggle_hotkey.start({"toggle_overlay": key}) and key:
-            # No global hotkeys available; fall back to a shortcut that works while focused.
             self._overlay_toggle_shortcut = QShortcut(QKeySequence(key), self)
             self._overlay_toggle_shortcut.activated.connect(self._toggle_overlay)
 
@@ -1479,8 +1424,6 @@ class MainWindow(QMainWindow):
         config.save_config(self._config)
 
     def _set_companion_enabled_live(self, enabled: bool) -> str:
-        """Settings callback: start/stop the server and save just this setting.
-        Returns the pairing code."""
         self._config.companion_enabled = enabled
         if enabled and not self._config.companion_token:
             self._config.companion_token = api_server.generate_pair_code()
@@ -1489,7 +1432,6 @@ class MainWindow(QMainWindow):
         return self._config.companion_token
 
     def _mark_companion_notice_shown(self) -> None:
-        """Settings callback: saved immediately so it sticks even if Settings is cancelled."""
         self._config.companion_firewall_notice_shown = True
         config.save_config(self._config)
 
@@ -1516,7 +1458,6 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage("Saves updated from companion app.", 4000)
 
     def _on_remote_sort_changed(self, mode: str, desc: bool) -> None:
-        """The server already saved the new sort to disk; mirror it here."""
         self._config.slot_sort = mode
         self._config.slot_sort_desc = desc
         self._sync_sort_widgets()
@@ -1577,8 +1518,6 @@ class MainWindow(QMainWindow):
         if started:
             return
 
-        # Fall back to in-app shortcuts. Never add them alongside the global
-        # listener, which also fires while focused, or actions double-trigger.
         self._global_hotkeys.stop()
         for action, key in hotkeys.items():
             if key:
@@ -1593,9 +1532,6 @@ class MainWindow(QMainWindow):
             self.status_bar.showMessage(msg, 6000)
 
     def eventFilter(self, obj, event) -> bool:
-        # If next/prev slot are bound to the list's own navigation keys (e.g. Up/Down),
-        # the global hotkey and the list would both move the selection. Let only the
-        # hotkey handle it.
         if obj is self.slot_list and event.type() == QEvent.Type.KeyPress and self._global_hotkeys_started:
             seq = QKeySequence(event.keyCombination()).toString()
             if seq and seq in (self._config.hotkey_next_slot, self._config.hotkey_prev_slot):
@@ -1687,7 +1623,6 @@ def _game_path_display(cfg: Optional[storage.GameConfig]) -> str:
 
 
 def _live_game_files(game_cfg: storage.GameConfig) -> list[Path]:
-    """The live save files that Practice Mode watches."""
     if game_cfg.save_mode == "file":
         return [Path(game_cfg.save_path)]
     if game_cfg.save_mode == "files":
@@ -1724,8 +1659,6 @@ class _SlotItem(QWidget):
 
 
 class _InfoRow(QWidget):
-    """Label + value pair inside the info box."""
-
     def __init__(self, label: str, value: str) -> None:
         super().__init__()
         layout = QHBoxLayout(self)
