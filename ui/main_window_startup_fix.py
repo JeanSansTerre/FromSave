@@ -1,32 +1,166 @@
-"""Isolated folder-list extension for the incremental compatibility branch.
+"""Incremental compatibility patch for the experimental folder UI branch.
 
-The main window stays based on the known-starting version. This module adds only the
-folder headers and their storage hooks at startup.
+The main window source currently lacks its info-panel and action-bar builders. This
+module restores those methods and then adds folder handling without editing the
+known-starting main_window.py implementation.
 """
 from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QSize, Qt, QSignalBlocker
 from PySide6.QtWidgets import (
-    QAbstractItemView, QInputDialog, QListWidgetItem, QMessageBox, QPushButton,
+    QAbstractItemView, QCheckBox, QFrame, QHBoxLayout, QInputDialog, QLabel,
+    QListWidgetItem, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea,
+    QVBoxLayout, QWidget,
 )
+
+
+def _install_missing_builders(MainWindow) -> None:
+    from ui.main_window import _InfoRow
+    from ui.video_player import InlineVideoPlayer
+
+    def _build_info_panel(self):
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setFrameShape(QFrame.NoFrame)
+
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(8, 0, 8, 0)
+        layout.setSpacing(0)
+
+        title = QLabel("Slot details")
+        title.setObjectName("panelHeader")
+        layout.addWidget(title)
+        layout.addSpacing(10)
+
+        name_row = QHBoxLayout()
+        self.detail_name = QLabel("—")
+        self.detail_name.setObjectName("detailName")
+        name_row.addWidget(self.detail_name, 1)
+        self.rename_btn = QPushButton("Rename")
+        self.rename_btn.setObjectName("ghostBtn")
+        self.rename_btn.setEnabled(False)
+        self.rename_btn.clicked.connect(self._on_rename_slot)
+        name_row.addWidget(self.rename_btn)
+        layout.addLayout(name_row)
+
+        self.detail_time = QLabel("—")
+        self.detail_time.setObjectName("mutedLabel")
+        layout.addWidget(self.detail_time)
+        layout.addSpacing(16)
+
+        notes_label = QLabel("Notes")
+        notes_label.setObjectName("fieldLabel")
+        layout.addWidget(notes_label)
+        layout.addSpacing(4)
+        self.detail_notes = QPlainTextEdit()
+        self.detail_notes.setObjectName("detailNotes")
+        self.detail_notes.setPlaceholderText("No notes.")
+        self.detail_notes.setMaximumHeight(90)
+        self.detail_notes.textChanged.connect(self._on_notes_changed)
+        layout.addWidget(self.detail_notes)
+        layout.addSpacing(16)
+
+        video_label = QLabel("Video")
+        video_label.setObjectName("fieldLabel")
+        layout.addWidget(video_label)
+        layout.addSpacing(4)
+        video_row = QHBoxLayout()
+        video_row.setSpacing(6)
+        self.detail_video_url = __import__("PySide6.QtWidgets", fromlist=["QLineEdit"]).QLineEdit()
+        self.detail_video_url.setObjectName("detailVideoUrl")
+        self.detail_video_url.setPlaceholderText("YouTube or direct video URL")
+        self.detail_video_url.textChanged.connect(self._on_video_changed)
+        video_row.addWidget(self.detail_video_url, 1)
+        self.browse_video_btn = QPushButton("Browse")
+        self.browse_video_btn.setObjectName("ghostBtn")
+        self.browse_video_btn.clicked.connect(self._on_browse_video)
+        video_row.addWidget(self.browse_video_btn)
+        self.clear_video_btn = QPushButton("Clear")
+        self.clear_video_btn.setObjectName("ghostBtn")
+        self.clear_video_btn.setEnabled(False)
+        self.clear_video_btn.clicked.connect(self._on_clear_video)
+        video_row.addWidget(self.clear_video_btn)
+        layout.addLayout(video_row)
+
+        self._inline_player = InlineVideoPlayer()
+        self._inline_player.setVisible(False)
+        layout.addWidget(self._inline_player)
+        layout.addSpacing(16)
+
+        info_box = QFrame()
+        info_box.setObjectName("infoBox")
+        info_layout = QVBoxLayout(info_box)
+        info_layout.setContentsMargins(12, 10, 12, 10)
+        info_layout.setSpacing(6)
+        info_title = QLabel("Game info")
+        info_title.setObjectName("fieldLabel")
+        info_layout.addWidget(info_title)
+        self.info_save_path = _InfoRow("Save path", "—")
+        self.info_created = _InfoRow("Created", "—")
+        self.info_modified = _InfoRow("Modified", "—")
+        self.info_file_size = _InfoRow("File size", "—")
+        self.info_ro_status = _InfoRow("Practice", "—")
+        for row in (self.info_save_path, self.info_created, self.info_modified,
+                    self.info_file_size, self.info_ro_status):
+            info_layout.addWidget(row)
+        layout.addWidget(info_box)
+        layout.addStretch()
+        scroll.setWidget(panel)
+        return scroll
+
+    def _build_action_bar(self):
+        from ui.main_window import _btn_text
+        bar = QHBoxLayout()
+        bar.setSpacing(6)
+        self.import_btn = QPushButton(_btn_text("Import Save", self._config.hotkey_import))
+        self.import_btn.setObjectName("primaryBtn")
+        self.import_btn.clicked.connect(self._on_import_save)
+        self.replace_btn = QPushButton("Replace Save")
+        self.replace_btn.clicked.connect(self._on_replace_save)
+        self.load_btn = QPushButton(_btn_text("Load Save", self._config.hotkey_load))
+        self.load_btn.clicked.connect(self._on_load_save)
+        self.delete_btn = QPushButton("Delete slot")
+        self.delete_btn.setObjectName("dangerBtn")
+        self.delete_btn.clicked.connect(self._on_delete_slot)
+        for button in (self.import_btn, self.replace_btn, self.load_btn, self.delete_btn):
+            bar.addWidget(button)
+        bar.addStretch()
+        self.ro_btn = QPushButton(_btn_text("Practice Mode", self._config.hotkey_ro_toggle))
+        self.ro_btn.setObjectName("ghostBtn")
+        self.ro_btn.setCheckable(True)
+        self.ro_btn.setEnabled(False)
+        self.ro_btn.toggled.connect(self._on_ro_toggled)
+        bar.addWidget(self.ro_btn)
+        self.run_mode_btn = QPushButton("Run Mode")
+        self.run_mode_btn.setObjectName("ghostBtn")
+        self.run_mode_btn.setCheckable(True)
+        self.run_mode_btn.setToolTip(
+            "Disables Load Save and Practice Mode to protect the game save,\\n"
+            "and takes a rolling backup every 2 minutes (keeps last 3)."
+        )
+        self.run_mode_btn.toggled.connect(self._on_run_mode_toggled)
+        bar.addWidget(self.run_mode_btn)
+        return bar
+
+    MainWindow._build_info_panel = _build_info_panel
+    MainWindow._build_action_bar = _build_action_bar
 
 
 def _install_storage_groups() -> None:
     import storage
 
     marker = ".fromsave-folder"
-    original_load_profiles = storage.load_profiles
-    original_load_slots = storage.load_slots
-    original_load_sorted_slots = storage.load_sorted_slots
-    original_auto_slot_name = storage.auto_slot_name
     original_import_save = storage.import_save
 
     def load_profiles(game: str) -> list[str]:
-        return sorted(
-            p.name for p in (storage.SAVES_DIR / game).iterdir()
-            if p.is_dir() and not (p / marker).exists()
-        ) if game and (storage.SAVES_DIR / game).exists() else []
+        game_dir = storage.SAVES_DIR / game
+        if not game or not game_dir.exists():
+            return []
+        return sorted(p.name for p in game_dir.iterdir()
+                      if p.is_dir() and not (p / marker).is_file())
 
     def load_groups(game: str, profile: str) -> list[str]:
         profile_dir = storage.SAVES_DIR / game / profile
@@ -39,13 +173,8 @@ def _install_storage_groups() -> None:
         name = storage.validate_entry_name(name)
         folder = storage.SAVES_DIR / game / profile / name
         folder.mkdir(parents=True, exist_ok=False)
-        (folder / marker).write_text("FromSave folder\n", encoding="utf-8")
+        (folder / marker).write_text("FromSave folder\\n", encoding="utf-8")
         return folder
-
-    def _set_group(slot, folder: str):
-        if slot is not None:
-            slot.group = folder
-        return slot
 
     def load_slots(game: str, profile: str):
         profile_dir = storage.SAVES_DIR / game / profile
@@ -57,34 +186,35 @@ def _install_storage_groups() -> None:
                 continue
             if (entry / marker).is_file():
                 for slot_dir in sorted(entry.iterdir()):
-                    if slot_dir.is_dir() and slot_dir.name != marker:
+                    if slot_dir.is_dir():
                         slot = storage._read_slot(slot_dir, game, profile)
                         if slot:
-                            slots.append(_set_group(slot, entry.name))
+                            slot.group = entry.name
+                            slots.append(slot)
             else:
                 slot = storage._read_slot(entry, game, profile)
                 if slot:
-                    slots.append(_set_group(slot, ""))
+                    slot.group = ""
+                    slots.append(slot)
         return slots
 
     def load_sorted_slots(game: str, profile: str, sort: str, desc: bool):
         slots = load_slots(game, profile)
         if sort == "name":
-            slots.sort(key=lambda s: (s.group.lower(), s.name.lower()), reverse=desc)
+            slots.sort(key=lambda slot: (slot.group.lower(), slot.name.lower()), reverse=desc)
         elif sort == "created":
-            slots.sort(key=lambda s: s.date_created or datetime.min, reverse=desc)
+            slots.sort(key=lambda slot: slot.date_created or datetime.min, reverse=desc)
         elif sort == "modified":
-            slots.sort(key=lambda s: s.date_modified or s.date_created or datetime.min, reverse=desc)
+            slots.sort(key=lambda slot: slot.date_modified or slot.date_created or datetime.min,
+                       reverse=desc)
         elif sort == "custom":
-            saved = original_load_sorted_slots(game, profile, "custom", desc)
-            # Keep group order stable while honoring the saved order for slots.
-            order = {slot.path: index for index, slot in enumerate(saved)}
-            slots.sort(key=lambda slot: order.get(slot.path, len(order)))
+            order = {name: index for index, name in enumerate(storage.load_slot_order(game, profile))}
+            slots.sort(key=lambda slot: order.get(slot.name, len(order)))
         return slots
 
     def auto_slot_name(game: str, profile: str, group: str = "") -> str:
-        directory = storage.SAVES_DIR / game / profile / group if group else storage.SAVES_DIR / game / profile
-        return storage._unique_name(directory, "new save")
+        parent = storage.SAVES_DIR / game / profile / group if group else storage.SAVES_DIR / game / profile
+        return storage._unique_name(parent, "new save")
 
     def import_save(game: str, profile: str, slot_name: str, game_cfg, group: str = ""):
         if not group:
@@ -99,7 +229,10 @@ def _install_storage_groups() -> None:
             now = datetime.now()
             storage._write_json(slot_dir / "meta.json", storage._timestamps(now, now))
             (slot_dir / "notes.txt").write_text("", encoding="utf-8")
-            return _set_group(storage._read_slot(slot_dir, game, profile), group)
+            slot = storage._read_slot(slot_dir, game, profile)
+            if slot:
+                slot.group = group
+            return slot
         except Exception:
             import shutil
             shutil.rmtree(slot_dir, ignore_errors=True)
@@ -114,16 +247,15 @@ def _install_storage_groups() -> None:
     storage.import_save = import_save
 
 
-def install() -> None:
-    _install_storage_groups()
+def _install_folder_ui() -> None:
     import storage
-    from ui.main_window import MainWindow, _SlotItem
+    from ui.main_window import MainWindow, _SlotItem, _fmt_dt, _fmt_size
 
     original_build_slot_panel = MainWindow._build_slot_panel
-    original_import_as = MainWindow._import_as
 
     def _build_slot_panel(self):
         panel = original_build_slot_panel(self)
+        self.new_group_btn.hide()
         self.folder_btn = QPushButton("+Folder")
         self.folder_btn.setObjectName("ghostBtn")
         self.folder_btn.setToolTip("Create a collapsible folder for save slots")
@@ -136,8 +268,7 @@ def install() -> None:
         return panel
 
     def _on_new_folder(self) -> None:
-        game = self.game_combo.currentText()
-        profile = self.profile_combo.currentText()
+        game, profile = self.game_combo.currentText(), self.profile_combo.currentText()
         if not game or not profile:
             self._notify("Select a game and profile first.")
             return
@@ -205,14 +336,12 @@ def install() -> None:
         self._import_as(cfg, profile, name)
 
     def _reload_slots(self, select_slot: str = "") -> None:
-        game = self.game_combo.currentText()
-        profile = self.profile_combo.currentText()
+        game, profile = self.game_combo.currentText(), self.profile_combo.currentText()
         self._slots = (storage.load_sorted_slots(game, profile, self._config.slot_sort,
                                                 self._config.slot_sort_desc)
                        if game and profile else [])
         folders = storage.load_groups(game, profile) if game and profile else []
-        grouped: dict[str, list] = {}
-        ungrouped = []
+        grouped, ungrouped = {}, []
         for slot in self._slots:
             group = getattr(slot, "group", "")
             if group:
@@ -230,8 +359,7 @@ def install() -> None:
             self.slot_list.clear()
             for folder in folders:
                 expanded = folder not in self._collapsed_groups
-                prefix = "📁 ▾ " if expanded else "📁 ▸ "
-                header = QListWidgetItem(prefix + folder)
+                header = QListWidgetItem(("📁 ▾ " if expanded else "📁 ▸ ") + folder)
                 header.setData(Qt.UserRole + 1, "folder")
                 header.setData(Qt.UserRole + 2, folder)
                 header.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
@@ -267,8 +395,6 @@ def install() -> None:
         return self._row_to_slot.get(self.slot_list.currentRow())
 
     def _on_slot_selected(self, row: int) -> None:
-        # Group header rows have no SaveSlot object. Preserve the app's normal
-        # selection behavior for real slots without treating headers as saves.
         slot = self._row_to_slot.get(row)
         if slot is None:
             self._flush_notes()
@@ -301,3 +427,10 @@ def install() -> None:
     MainWindow._reload_slots = _reload_slots
     MainWindow._selected_slot = _selected_slot
     MainWindow._on_slot_selected = _on_slot_selected
+
+
+def install() -> None:
+    from ui.main_window import MainWindow
+    _install_missing_builders(MainWindow)
+    _install_storage_groups()
+    _install_folder_ui()
