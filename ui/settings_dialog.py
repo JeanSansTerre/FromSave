@@ -131,8 +131,6 @@ class SettingsDialog(QDialog):
         self._add_checkbox(behaviour_layout, "confirm_lock_slot", "Confirm before enabling practice mode")
         self._add_checkbox(behaviour_layout, "soft_delete",
                            "Send deleted saves to the system trash instead of permanently deleting")
-        self._add_checkbox(behaviour_layout, "hide_details",
-                           "Hide details panel  (slot name, notes, and game info)")
         self._add_checkbox(behaviour_layout, "hide_paths", "Hide file paths").toggled.connect(
             self._apply_path_hide
         )

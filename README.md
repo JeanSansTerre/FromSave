@@ -15,13 +15,14 @@ The following games come pre-configured and will appear in the game dropdown aut
 - Sekiro: Shadows Die Twice
 - Armored Core VI
 
-Any other game can be added manually via **Settings > Add game**.
+Any other game can be added with the **+** button next to the **Game** dropdown (or via **Settings > Add game**).
 
 ## Getting started
 
-1. Open the app and select a game from the dropdown.
-2. Go to **Settings** and set the save file path for that game.
-3. Click **Import Save** to create your first slot.
+1. Open the app and select a game from the dropdown, or add one with the **+** next to it.
+2. Go to **Settings** and set the save file path for that game (not needed for a game you just added with **+**).
+3. Press the **+** next to **Profile** to create a profile if the game has none yet.
+4. Click **Import Save** to create your first slot.
 
 ## Linux / SteamOS
 
@@ -100,7 +101,7 @@ Once copied in, open the app (or switch to a different game and back). Your prof
 
 ## Folders
 
-Click **+ Folder** above the slot list to create a folder in the current profile. Drag a slot onto a folder to file it there, or drag it onto a top-level slot (or use **Remove from folder** in its right-click menu) to take it out. Click a folder to collapse or expand it, and right-click it to rename it or delete it once it is empty. A folder only groups slots, so it can't be loaded into the game.
+Click **+ Folder** above the slot list to create a folder in the current profile. Drag a slot onto a folder to file it there, or drag it onto a top-level slot (or use **Remove from folder** in its right-click menu) to take it out. To move several slots at once, select them with Ctrl-click or Shift-click and drag them together, or right-click the selection and use **Move to folder**. Load, Replace, Delete and the other single-slot actions need exactly one slot selected. Click a folder to collapse or expand it, and right-click it to rename it or delete it once it is empty. A folder only groups slots, so it can't be loaded into the game.
 
 On disk a folder is a directory inside the profile that contains a hidden `.fromsave_folder` file, so slots from other save managers are never mistaken for folders. Slot and folder names are unique within a profile.
 
@@ -159,16 +160,9 @@ A separate **Overlay** can be shown over the game (default hotkey: **Insert**) w
   </tr>
 </table>
 
-## Attaching a video to a slot
+## Notes and videos
 
-Each slot has an optional **Video** field in the detail panel where you can paste a link and it will play inline:
-
-- YouTube links (including `youtu.be` and Shorts links)
-- Direct video files (`.mp4`, `.webm`, `.ogg`, `.mov`, `.m4v`, `.mkv`), either a URL or a local file via **Browse**
-
-Use the player's fullscreen button to expand it, and the volume slider for local/YouTube playback. Click **Clear** to remove the video from a slot.
-
-> **Note:** Twitch VODs and clips are not currently supported for inline playback, due to the way Twitch handles video embeds. Use **Open in browser** instead.
+The details panel (slot notes, video link, and game info) has been removed so the slot list can use the whole window. Notes and video links already stored in a slot (`notes.txt` and `meta.json`) are left untouched, and a slot that has a video link still offers **Open video in browser** in its right-click menu.
 
 ## Checking for updates
 
@@ -179,12 +173,12 @@ FromSave can check GitHub for newer releases and update itself in place.
 
 ## Adding a new game
 
-1. Open **Settings** and click **Add game**.
+1. Click the **+** next to the **Game** dropdown (or open **Settings** and click **Add game**).
 2. Enter the game name and select the save type (single file, multiple files, or folder).
 3. Set the path to the game's save file or folder.
-4. Click **Add**, then **Save**.
+4. Click **Add**. From the main window the game is added and selected right away; in Settings, click **Save** afterwards.
 
-The game will appear in the dropdown and a folder for it will be created in `saves/` automatically.
+A folder for the game is created in `saves/` automatically. Then press the **+** next to **Profile** to create its first profile.
 
 <img src="docs/screenshots/game_paths.png" alt="Game save paths in Settings" width="550">
 
