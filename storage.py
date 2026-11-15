@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 _RESERVED = {"meta.json", "notes.txt"}
 _GAME_CONFIG = "game.json"
+_GROUP_MARKER = ".fromsave-group"
 _BACKUPS_DIR = "_backups"
 _RUN_BACKUPS_DIR = "_run_backups"
 _PRACTICE_START_DIR = "_practice_start"
@@ -59,6 +60,7 @@ class SaveSlot:
     notes: str
     save_file: Optional[str]
     video_url: str = ""
+    group: str = ""
 
 
 def _read_json_dict(path: Path) -> dict:
@@ -74,11 +76,6 @@ def _read_json_dict(path: Path) -> dict:
 
 def _write_json(path: Path, data) -> None:
     path.write_text(json.dumps(data, indent=4), encoding="utf-8")
-
-
-def _timestamps(created: datetime, modified: datetime) -> dict:
-    return {"created": created.isoformat(timespec="seconds"),
-            "modified": modified.isoformat(timespec="seconds")}
 
 
 def _parse_iso(value: Optional[str]) -> Optional[datetime]:
@@ -140,7 +137,8 @@ def load_profiles(game: str) -> list[str]:
     game_dir = SAVES_DIR / game
     if not game or not game_dir.exists():
         return []
-    return sorted(p.name for p in game_dir.iterdir() if p.is_dir())
+    return sorted(p.name for p in game_dir.iterdir()
+                  if p.is_dir() and not (p / _GROUP_MARKER).exists())
 
 
 def create_profile(game: str, name: str) -> None:
@@ -155,39 +153,82 @@ def delete_profile(game: str, name: str) -> None:
     send2trash.send2trash(str(SAVES_DIR / game / name))
 
 
+def load_groups(game: str, profile: str) -> list[str]:
+    profile_dir = SAVES_DIR / game / profile
+    if not profile_dir.exists():
+        return []
+    return sorted(p.name for p in profile_dir.iterdir()
+                  if p.is_dir() and (p / _GROUP_MARKER).exists())
+
+
+def create_group(game: str, profile: str, name: str) -> Path:
+    """Create a marked group folder; marker disambiguates it from folder-save data."""
+    group_dir = SAVES_DIR / game / profile / validate_entry_name(name)
+    group_dir.mkdir(parents=True, exist_ok=False)
+    (group_dir / _GROUP_MARKER).write_text("FromSave save group\n", encoding="utf-8")
+    return group_dir
+
+
 def _is_save_file(path: Path) -> bool:
     return path.is_file() and path.name not in _RESERVED and not path.name.startswith(".")
 
 
-def _slot_data_dir(slot_path: Path) -> Path:
-    """Use legacy save_data when present; otherwise saves live in the slot directory."""
+def _slot_has_data(slot_path: Path) -> bool:
     legacy = slot_path / "save_data"
-    return legacy if legacy.is_dir() else slot_path
+    if legacy.is_dir() and any(p.is_file() for p in legacy.rglob("*")):
+        return True
+    return any(_is_save_file(p) or (p.is_dir() and p.name != "save_data")
+               for p in slot_path.iterdir())
 
 
 def slot_save_files(slot: SaveSlot) -> list[Path]:
-    """Return save files in either the legacy save_data layout or direct slot layout."""
-    data_dir = _slot_data_dir(slot.path)
-    if not data_dir.is_dir():
-        return []
-    files = []
-    for f in data_dir.rglob("*"):
-        if not f.is_file():
-            continue
-        # These are FromSave's root-level slot metadata, never game save data.
-        if data_dir == slot.path and f.parent == slot.path and f.name in _RESERVED:
-            continue
-        files.append(f)
-    return files
+    """List save files from direct slots and legacy save_data slots."""
+    data_dir = slot.path / "save_data"
+    if data_dir.is_dir():
+        return [p for p in data_dir.rglob("*") if p.is_file()]
+    return [p for p in slot.path.rglob("*") if p.is_file()
+            and not (p.parent == slot.path and p.name in _RESERVED)]
+
+
+def _read_slot(slot_dir: Path, game: str, profile: str, group: str = "") -> Optional[SaveSlot]:
+    if not _slot_has_data(slot_dir):
+        return None
+    meta = _read_json_dict(slot_dir / "meta.json")  # read old metadata, but never require or create it
+    notes_path = slot_dir / "notes.txt"
+    try:
+        notes = notes_path.read_text(encoding="utf-8").strip() if notes_path.exists() else ""
+    except OSError:
+        logger.exception("Failed to read notes: %s", notes_path)
+        notes = ""
+    files = slot_save_files(SaveSlot(slot_dir.name, game, profile, slot_dir, None, None, "", None))
+    save_file = files[0].name if len(files) == 1 and files[0].parent == slot_dir else None
+    created = _parse_iso(meta.get("created"))
+    modified = _parse_iso(meta.get("modified"))
+    if files:
+        try:
+            stat = files[0].stat()
+            created = created or datetime.fromtimestamp(getattr(stat, "st_birthtime", stat.st_ctime))
+            modified = modified or datetime.fromtimestamp(stat.st_mtime)
+        except OSError:
+            logger.debug("Unable to read save timestamps: %s", files[0])
+    return SaveSlot(slot_dir.name, game, profile, slot_dir, created, modified,
+                    notes, save_file, meta.get("video_url", ""), group)
 
 
 def load_slots(game: str, profile: str) -> list[SaveSlot]:
     profile_dir = SAVES_DIR / game / profile
     if not profile_dir.exists():
         return []
-    slots = []
-    for slot_dir in sorted(profile_dir.iterdir()):
-        if slot_dir.is_dir() and (slot := _read_slot(slot_dir, game, profile)):
+    slots: list[SaveSlot] = []
+    for entry in sorted(profile_dir.iterdir()):
+        if not entry.is_dir():
+            continue
+        if (entry / _GROUP_MARKER).exists():
+            for slot_dir in sorted(entry.iterdir()):
+                if slot_dir.is_dir() and slot_dir.name != _GROUP_MARKER:
+                    if slot := _read_slot(slot_dir, game, profile, entry.name):
+                        slots.append(slot)
+        elif slot := _read_slot(entry, game, profile):
             slots.append(slot)
     logger.debug("Loaded %d slot(s) for game=%r profile=%r", len(slots), game, profile)
     return slots
@@ -196,49 +237,16 @@ def load_slots(game: str, profile: str) -> list[SaveSlot]:
 def load_sorted_slots(game: str, profile: str, sort: str, desc: bool) -> list[SaveSlot]:
     slots = load_slots(game, profile)
     if sort == "name":
-        slots.sort(key=lambda s: s.name.lower(), reverse=desc)
+        slots.sort(key=lambda s: (s.group.lower(), s.name.lower()), reverse=desc)
     elif sort == "created":
         slots.sort(key=lambda s: s.date_created or datetime.min, reverse=desc)
     elif sort == "modified":
         slots.sort(key=lambda s: s.date_modified or s.date_created or datetime.min, reverse=desc)
     elif sort == "custom":
         order = {name: i for i, name in enumerate(load_slot_order(game, profile))}
-        slots.sort(key=lambda s: order.get(s.name, len(order)))
-        save_slot_order(game, profile, [s.name for s in slots])
+        slots.sort(key=lambda s: order.get(f"{s.group}/{s.name}" if s.group else s.name, len(order)))
+        save_slot_order(game, profile, [f"{s.group}/{s.name}" if s.group else s.name for s in slots])
     return slots
-
-
-def _read_slot(slot_dir: Path, game: str, profile: str) -> Optional[SaveSlot]:
-    meta_file, notes_file = slot_dir / "meta.json", slot_dir / "notes.txt"
-    legacy_folder = (slot_dir / "save_data").is_dir()
-    # Direct-layout folder saves may contain only subdirectories, so count any
-    # non-metadata directory as save data as well as root-level save files.
-    data_dirs = [p for p in slot_dir.iterdir() if p.is_dir() and not p.name.startswith(".")]
-    save_file = None if legacy_folder or data_dirs else next(
-        (f.name for f in slot_dir.iterdir() if _is_save_file(f)), None)
-    has_direct_data = any(p.name not in _RESERVED and not p.name.startswith(".")
-                          for p in slot_dir.iterdir())
-    if not has_direct_data and not meta_file.exists():
-        return None
-    if not meta_file.exists():
-        if save_file:
-            stat = (slot_dir / save_file).stat()
-            created = datetime.fromtimestamp(getattr(stat, "st_birthtime", stat.st_ctime))
-            modified = datetime.fromtimestamp(stat.st_mtime)
-        else:
-            created = modified = datetime.now()
-        _write_json(meta_file, _timestamps(created, modified))
-    if not notes_file.exists():
-        notes_file.write_text("", encoding="utf-8")
-    meta = _read_json_dict(meta_file)
-    try:
-        notes = notes_file.read_text(encoding="utf-8").strip()
-    except OSError:
-        logger.exception("Failed to read notes: %s", notes_file)
-        notes = ""
-    return SaveSlot(slot_dir.name, game, profile, slot_dir,
-                    _parse_iso(meta.get("created")), _parse_iso(meta.get("modified")),
-                    notes, save_file, meta.get("video_url", ""))
 
 
 def _update_meta(meta_file: Path, updates: dict) -> None:
@@ -248,6 +256,7 @@ def _update_meta(meta_file: Path, updates: dict) -> None:
 
 
 def save_notes(slot: SaveSlot, text: str) -> None:
+    # Retained for old UI/API clients. The streamlined UI need not write notes.
     (slot.path / "notes.txt").write_text(text, encoding="utf-8")
     slot.notes = text
 
@@ -278,24 +287,31 @@ def _unique_name(folder: Path, base: str) -> str:
     return name
 
 
-def auto_slot_name(game: str, profile: str) -> str:
-    return _unique_name(SAVES_DIR / game / profile, "new save")
+def auto_slot_name(game: str, profile: str, group: str = "") -> str:
+    parent = SAVES_DIR / game / profile / group if group else SAVES_DIR / game / profile
+    return _unique_name(parent, "new save")
 
 
-def duplicate_slot_name(game: str, profile: str, original_name: str) -> str:
-    return _unique_name(SAVES_DIR / game / profile, f"{original_name} copy")
+def duplicate_slot_name(game: str, profile: str, original_name: str, group: str = "") -> str:
+    parent = SAVES_DIR / game / profile / group if group else SAVES_DIR / game / profile
+    return _unique_name(parent, f"{original_name} copy")
 
 
 def copy_slot_to_profile(slot: SaveSlot, target_profile: str, new_name: str) -> SaveSlot:
-    new_dir = SAVES_DIR / slot.game / target_profile / new_name
+    target_dir = SAVES_DIR / slot.game / target_profile
+    if slot.group:
+        target_dir = target_dir / slot.group
+        target_dir.mkdir(parents=True, exist_ok=True)
+        (target_dir / _GROUP_MARKER).touch(exist_ok=True)
+    new_dir = target_dir / new_name
     shutil.copytree(slot.path, new_dir)
-    now = datetime.now()
-    _update_meta(new_dir / "meta.json", _timestamps(now, now))
-    return _read_slot(new_dir, slot.game, target_profile)
+    return _read_slot(new_dir, slot.game, target_profile, slot.group)
 
 
 def duplicate_slot(slot: SaveSlot, new_name: str) -> SaveSlot:
-    return copy_slot_to_profile(slot, slot.profile, new_name)
+    new_dir = slot.path.parent / new_name
+    shutil.copytree(slot.path, new_dir)
+    return _read_slot(new_dir, slot.game, slot.profile, slot.group)
 
 
 def load_slot_order(game: str, profile: str) -> list[str]:
@@ -328,28 +344,10 @@ def _copy_file(src: Path, dst: Path) -> None:
     shutil.copy2(src, dst)
 
 
-def _replace_tree(src: Path, dst: Path, *, exclude_slot_metadata: bool = False) -> None:
+def _replace_tree(src: Path, dst: Path) -> None:
     if dst.exists():
         shutil.rmtree(dst)
-    logger.debug("Copying folder %s -> %s", src, dst)
-    ignore = None
-    if exclude_slot_metadata:
-        ignore = lambda directory, names: list(_RESERVED.intersection(names)) if Path(directory) == src else []
-    shutil.copytree(src, dst, ignore=ignore)
-
-
-def _replace_slot_contents(src: Path, dest: Path) -> None:
-    """Replace a slot's save data but preserve FromSave's root metadata files."""
-    dest.mkdir(parents=True, exist_ok=True)
-    for child in dest.iterdir():
-        if child.name in _RESERVED:
-            continue
-        if child.is_dir():
-            shutil.rmtree(child)
-        else:
-            child.unlink()
-    ignore = lambda directory, names: list(_RESERVED.intersection(names)) if Path(directory) == src else []
-    shutil.copytree(src, dest, dirs_exist_ok=True, ignore=ignore)
+    shutil.copytree(src, dst)
 
 
 def _copy_live_save(game_cfg: GameConfig, dest: Path, file_name: Optional[str] = None) -> None:
@@ -364,7 +362,7 @@ def _copy_live_save(game_cfg: GameConfig, dest: Path, file_name: Optional[str] =
             else:
                 logger.warning("Configured save file missing: %s", src)
     elif game_cfg.save_mode == "folder":
-        _replace_slot_contents(Path(game_cfg.save_path), dest)
+        _replace_tree(Path(game_cfg.save_path), dest / "save_data")
 
 
 def _copy_to_live(src_dir: Path, game_cfg: GameConfig, file_name: Optional[str]) -> None:
@@ -383,21 +381,22 @@ def _copy_to_live(src_dir: Path, game_cfg: GameConfig, file_name: Optional[str])
         legacy = src_dir / "save_data"
         data_dir = legacy if legacy.is_dir() else src_dir
         if data_dir == src_dir:
-            _replace_tree(data_dir, Path(game_cfg.save_path), exclude_slot_metadata=True)
+            ignore = lambda directory, names: [n for n in names if directory == str(src_dir) and n in _RESERVED]
+            shutil.copytree(data_dir, Path(game_cfg.save_path), dirs_exist_ok=True, ignore=ignore)
         else:
             _replace_tree(data_dir, Path(game_cfg.save_path))
 
 
-def import_save(game: str, profile: str, slot_name: str, game_cfg: GameConfig) -> SaveSlot:
-    slot_dir = SAVES_DIR / game / profile / slot_name
-    logger.info("Importing save: game=%r profile=%r slot=%r mode=%s", game, profile, slot_name, game_cfg.save_mode)
+def import_save(game: str, profile: str, slot_name: str, game_cfg: GameConfig,
+                group: str = "") -> SaveSlot:
+    slot_parent = SAVES_DIR / game / profile / group if group else SAVES_DIR / game / profile
+    slot_dir = slot_parent / slot_name
+    logger.info("Importing save: game=%r profile=%r group=%r slot=%r mode=%s",
+                game, profile, group, slot_name, game_cfg.save_mode)
     slot_dir.mkdir(parents=True, exist_ok=False)
     try:
         _copy_live_save(game_cfg, slot_dir)
-        now = datetime.now()
-        _write_json(slot_dir / "meta.json", _timestamps(now, now))
-        (slot_dir / "notes.txt").write_text("", encoding="utf-8")
-        return _read_slot(slot_dir, game, profile)
+        return _read_slot(slot_dir, game, profile, group)
     except Exception:
         shutil.rmtree(slot_dir, ignore_errors=True)
         raise
@@ -405,12 +404,7 @@ def import_save(game: str, profile: str, slot_name: str, game_cfg: GameConfig) -
 
 def replace_save(slot: SaveSlot, game_cfg: GameConfig) -> None:
     _copy_live_save(game_cfg, slot.path, file_name=slot.save_file)
-    now = datetime.now()
-    meta_file = slot.path / "meta.json"
-    meta = _read_json_dict(meta_file)
-    created = _parse_iso(meta.get("created")) or now
-    _update_meta(meta_file, _timestamps(created, now))
-    slot.date_modified = now
+    slot.date_modified = datetime.now()
 
 
 def load_save(slot: SaveSlot, game_cfg: GameConfig, *, make_backup: bool = True) -> None:
