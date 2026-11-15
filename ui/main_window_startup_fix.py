@@ -1,145 +1,142 @@
-"""Compatibility repair for UI builder methods omitted from an experimental branch edit.
+"""Small, isolated folder-list UI extension for the incremental compatibility branch.
 
-This restores the builder methods that MainWindow.__init__ expects so the app can start.
+The base MainWindow remains untouched so this feature can be tested independently.
 """
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QSize, Qt, QSignalBlocker
 from PySide6.QtWidgets import (
-    QFrame, QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit, QPushButton,
-    QScrollArea, QVBoxLayout, QWidget,
+    QAbstractItemView, QInputDialog, QListWidgetItem, QMessageBox, QPushButton,
 )
 
 
 def install() -> None:
-    from ui.main_window import MainWindow, _InfoRow
-    from ui.video_player import InlineVideoPlayer
+    import storage
+    from ui.main_window import MainWindow, _SlotItem
 
-    def _build_info_panel(self):
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        scroll.setFrameShape(QFrame.NoFrame)
+    original_build_slot_panel = MainWindow._build_slot_panel
+    original_import_as = MainWindow._import_as
 
-        panel = QWidget()
-        layout = QVBoxLayout(panel)
-        layout.setContentsMargins(8, 0, 8, 0)
-        layout.setSpacing(0)
+    def _build_slot_panel(self):
+        panel = original_build_slot_panel(self)
+        # Put the creation action next to the save list, not in the top game/profile row.
+        if hasattr(self, "new_group_btn"):
+            self.new_group_btn.hide()
+        self.folder_btn = QPushButton("+Folder")
+        self.folder_btn.setObjectName("ghostBtn")
+        self.folder_btn.setToolTip("Create a collapsible folder for save slots")
+        self.folder_btn.clicked.connect(self._on_new_folder)
+        panel.layout().insertWidget(0, self.folder_btn)
+        return panel
 
-        lbl = QLabel("Slot details")
-        lbl.setObjectName("panelHeader")
-        layout.addWidget(lbl)
-        layout.addSpacing(10)
+    def _on_new_folder(self) -> None:
+        game = self.game_combo.currentText()
+        profile = self.profile_combo.currentText()
+        if not game or not profile:
+            self._notify("Select a game and profile first.")
+            return
+        name, ok = QInputDialog.getText(self, "New folder", "Folder name:")
+        if not ok or not name.strip():
+            return
+        try:
+            name = storage.validate_entry_name(name)
+            storage.create_group(game, profile, name)
+        except (ValueError, FileExistsError) as exc:
+            QMessageBox.warning(self, "Cannot create folder", str(exc))
+            return
+        except Exception as exc:
+            QMessageBox.warning(self, "Cannot create folder", str(exc))
+            return
+        self._collapsed_groups.discard(name)
+        self._active_group = name
+        self._reload_slots()
+        self._notify(f"Created folder '{name}'. New imports will go into it.")
 
-        name_row = QHBoxLayout()
-        self.detail_name = QLabel("—")
-        self.detail_name.setObjectName("detailName")
-        name_row.addWidget(self.detail_name, 1)
-        self.rename_btn = QPushButton("Rename")
-        self.rename_btn.setObjectName("ghostBtn")
-        self.rename_btn.setEnabled(False)
-        self.rename_btn.clicked.connect(self._on_rename_slot)
-        name_row.addWidget(self.rename_btn)
-        layout.addLayout(name_row)
+    def _list_item_clicked(self, item: QListWidgetItem) -> None:
+        if item.data(Qt.UserRole + 1) != "folder":
+            return
+        folder = item.data(Qt.UserRole + 2) or ""
+        self._active_group = folder
+        if folder in self._collapsed_groups:
+            self._collapsed_groups.remove(folder)
+        else:
+            self._collapsed_groups.add(folder)
+        self._reload_slots()
 
-        self.detail_time = QLabel("—")
-        self.detail_time.setObjectName("mutedLabel")
-        layout.addWidget(self.detail_time)
-        layout.addSpacing(16)
+    def _import_as(self, cfg, profile: str, name: str, group: str = "") -> bool:
+        target_group = group or getattr(self, "_active_group", "")
+        return original_import_as(self, cfg, profile, name, target_group)
 
-        notes_lbl = QLabel("Notes")
-        notes_lbl.setObjectName("fieldLabel")
-        layout.addWidget(notes_lbl)
-        layout.addSpacing(4)
-        self.detail_notes = QPlainTextEdit()
-        self.detail_notes.setObjectName("detailNotes")
-        self.detail_notes.setPlaceholderText("No notes.")
-        self.detail_notes.setMaximumHeight(90)
-        self.detail_notes.textChanged.connect(self._on_notes_changed)
-        layout.addWidget(self.detail_notes)
-        layout.addSpacing(16)
-
-        video_lbl = QLabel("Video")
-        video_lbl.setObjectName("fieldLabel")
-        layout.addWidget(video_lbl)
-        layout.addSpacing(4)
-        video_row = QHBoxLayout()
-        video_row.setSpacing(6)
-        self.detail_video_url = QLineEdit()
-        self.detail_video_url.setObjectName("detailVideoUrl")
-        self.detail_video_url.setPlaceholderText("YouTube or direct video URL")
-        self.detail_video_url.textChanged.connect(self._on_video_changed)
-        video_row.addWidget(self.detail_video_url, 1)
-        self.browse_video_btn = QPushButton("Browse")
-        self.browse_video_btn.setObjectName("ghostBtn")
-        self.browse_video_btn.clicked.connect(self._on_browse_video)
-        video_row.addWidget(self.browse_video_btn)
-        self.clear_video_btn = QPushButton("Clear")
-        self.clear_video_btn.setObjectName("ghostBtn")
-        self.clear_video_btn.setEnabled(False)
-        self.clear_video_btn.clicked.connect(self._on_clear_video)
-        video_row.addWidget(self.clear_video_btn)
-        layout.addLayout(video_row)
-
-        self._inline_player = InlineVideoPlayer()
-        self._inline_player.setVisible(False)
-        layout.addWidget(self._inline_player)
-        layout.addSpacing(16)
-
-        info_box = QFrame()
-        info_box.setObjectName("infoBox")
-        info_layout = QVBoxLayout(info_box)
-        info_layout.setContentsMargins(12, 10, 12, 10)
-        info_layout.setSpacing(6)
-        info_title = QLabel("Game info")
-        info_title.setObjectName("fieldLabel")
-        info_layout.addWidget(info_title)
-
-        self.info_save_path = _InfoRow("Save path", "—")
-        self.info_created = _InfoRow("Created", "—")
-        self.info_modified = _InfoRow("Modified", "—")
-        self.info_file_size = _InfoRow("File size", "—")
-        self.info_ro_status = _InfoRow("Practice", "—")
-        for row in (self.info_save_path, self.info_created, self.info_modified,
-                    self.info_file_size, self.info_ro_status):
-            info_layout.addWidget(row)
-        layout.addWidget(info_box)
-        layout.addStretch()
-        scroll.setWidget(panel)
-        return scroll
-
-    def _build_action_bar(self):
-        bar = QHBoxLayout()
-        bar.setSpacing(6)
-        self.import_btn = QPushButton("Import Save")
-        self.import_btn.setObjectName("primaryBtn")
-        self.import_btn.clicked.connect(self._on_import_save)
-        self.replace_btn = QPushButton("Replace Save")
-        self.replace_btn.clicked.connect(self._on_replace_save)
-        self.load_btn = QPushButton("Load Save")
-        self.load_btn.clicked.connect(self._on_load_save)
-        self.delete_btn = QPushButton("Delete slot")
-        self.delete_btn.setObjectName("dangerBtn")
-        self.delete_btn.clicked.connect(self._on_delete_slot)
-        for button in (self.import_btn, self.replace_btn, self.load_btn, self.delete_btn):
-            bar.addWidget(button)
-        bar.addStretch()
-
-        self.ro_btn = QPushButton("Practice Mode")
-        self.ro_btn.setObjectName("ghostBtn")
-        self.ro_btn.setCheckable(True)
-        self.ro_btn.setEnabled(False)
-        self.ro_btn.toggled.connect(self._on_ro_toggled)
-        bar.addWidget(self.ro_btn)
-
-        self.run_mode_btn = QPushButton("Run Mode")
-        self.run_mode_btn.setObjectName("ghostBtn")
-        self.run_mode_btn.setCheckable(True)
-        self.run_mode_btn.setToolTip(
-            "Disables Load Save and Practice Mode to protect the game save,\n"
-            "and takes a rolling backup every 2 minutes (keeps last 3)."
+    def _reload_slots(self, select_slot: str = "") -> None:
+        game_name = self.game_combo.currentText()
+        profile_name = self.profile_combo.currentText()
+        self._slots = (
+            storage.load_sorted_slots(game_name, profile_name,
+                                      self._config.slot_sort, self._config.slot_sort_desc)
+            if game_name and profile_name else []
         )
-        self.run_mode_btn.toggled.connect(self._on_run_mode_toggled)
-        bar.addWidget(self.run_mode_btn)
-        return bar
+        folders = storage.load_groups(game_name, profile_name) if game_name and profile_name else []
+        self._row_to_slot = {}
+        # Reordering list rows would mix folder headers with saves; custom drag order
+        # remains available only for legacy profiles without folders.
+        self.slot_list.setDragDropMode(
+            QAbstractItemView.InternalMove
+            if self._config.slot_sort == "custom" and not folders
+            else QAbstractItemView.NoDragDrop
+        )
 
-    MainWindow._build_info_panel = _build_info_panel
-    MainWindow._build_action_bar = _build_action_bar
+        grouped: dict[str, list[storage.SaveSlot]] = {}
+        ungrouped: list[storage.SaveSlot] = []
+        for slot in self._slots:
+            (grouped.setdefault(slot.group, []).append(slot) if slot.group else ungrouped.append(slot))
+
+        with QSignalBlocker(self.slot_list):
+            self.slot_list.clear()
+            for folder in folders:
+                expanded = folder not in self._collapsed_groups
+                prefix = "📁 ▾ " if expanded else "📁 ▸ "
+                item = QListWidgetItem(prefix + folder)
+                item.setData(Qt.UserRole + 1, "folder")
+                item.setData(Qt.UserRole + 2, folder)
+                item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                self.slot_list.addItem(item)
+                self._row_to_slot[self.slot_list.count() - 1] = None
+                if not expanded:
+                    continue
+                # Preserve the order returned by storage.load_sorted_slots. Do not
+                # re-sort here: doing so silently broke the sort dropdown.
+                for slot in grouped.get(folder, []):
+                    row = QListWidgetItem()
+                    row.setData(Qt.UserRole, slot)
+                    row.setData(Qt.UserRole + 1, "slot")
+                    row.setSizeHint(QSize(0, 34))
+                    self.slot_list.addItem(row)
+                    self.slot_list.setItemWidget(row, _SlotItem(slot.name))
+                    self._row_to_slot[self.slot_list.count() - 1] = slot
+
+            for slot in ungrouped:
+                row = QListWidgetItem()
+                row.setData(Qt.UserRole, slot)
+                row.setData(Qt.UserRole + 1, "slot")
+                row.setSizeHint(QSize(0, 34))
+                self.slot_list.addItem(row)
+                self.slot_list.setItemWidget(row, _SlotItem(slot.name))
+                self._row_to_slot[self.slot_list.count() - 1] = slot
+
+        selected = next((row for row, slot in self._row_to_slot.items()
+                         if slot and slot.name == select_slot), None)
+        if selected is None:
+            selected = next((row for row, slot in self._row_to_slot.items() if slot), -1)
+        self.slot_list.setCurrentRow(selected)
+        if selected >= 0:
+            self._on_slot_selected(selected)
+        else:
+            self._clear_detail()
+
+    def _selected_slot(self):
+        return self._row_to_slot.get(self.slot_list.currentRow())
+
+    MainWindow._build_slot_panel = _build_slot_panel
+    MainWindow._on_new_folder = _on_new_folder
+    MainWindow._on_list_item_clicked = _list_item_clicked
+    MainWindow._import_as = _import_as
+    MainWindow._reload_slots = _reload_slots
+    MainWindow._selected_slot = _selected_slot
