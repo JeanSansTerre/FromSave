@@ -14,6 +14,8 @@ The following games come pre-configured and will appear in the game dropdown aut
 - Dark Souls III
 - Sekiro: Shadows Die Twice
 - Armored Core VI
+- Bloodborne (saved as a folder)
+- Demon's Souls (saved as a folder)
 
 Any other game can be added with the **+** button next to the **Game** dropdown (or via **Settings > Add game**).
 
@@ -101,7 +103,7 @@ Once copied in, open the app (or switch to a different game and back). Your prof
 
 ## Folders
 
-Click **+ Folder** above the slot list to create a folder in the current profile. Drag a slot onto a folder to file it there, or drag it onto a top-level slot (or use **Remove from folder** in its right-click menu) to take it out. To move several slots at once, select them with Ctrl-click or Shift-click and drag them together, or right-click the selection and use **Move to folder**. Load, Replace, Delete and the other single-slot actions need exactly one slot selected. Click a folder to collapse or expand it, and right-click it to rename it or delete it once it is empty. A folder only groups slots, so it can't be loaded into the game.
+Click **+ Folder** above the slot list to create a folder in the current profile. Drag a slot onto a folder to file it there, or drag it onto a top-level slot (or use **Remove from folder** in its right-click menu) to take it out. To move several slots at once, select them with Ctrl-click or Shift-click and drag them together, or right-click the selection and use **Move to folder**. Load, Replace, Delete and the other single-slot actions need exactly one slot selected. Double-click a folder to collapse or expand it (a single click only highlights it), and right-click it to rename it or delete it once it is empty. A folder only groups slots, so it can't be loaded into the game.
 
 On disk a folder is a directory inside the profile that contains a hidden `.fromsave_folder` file, so slots from other save managers are never mistaken for folders. Slot and folder names are unique within a profile.
 
@@ -162,7 +164,7 @@ A separate **Overlay** can be shown over the game (default hotkey: **Insert**) w
 
 ## Notes and videos
 
-The details panel (slot notes, video link, and game info) has been removed so the slot list can use the whole window. Notes and video links already stored in a slot (`notes.txt` and `meta.json`) are left untouched, and a slot that has a video link still offers **Open video in browser** in its right-click menu.
+The details panel (slot name, notes, video link, and game info) is hidden by default so the slot list can use the whole window. Tick **Settings > Behaviour > Show details panel** to bring it back next to the slot list. Notes and video links are stored in a slot's `notes.txt` and `meta.json`.
 
 ## Checking for updates
 

@@ -1,13 +1,15 @@
 import logging
+from datetime import datetime
 from pathlib import Path
 from typing import Optional, Union
 
 from PySide6.QtCore import QEvent, QFileSystemWatcher, QSignalBlocker, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QIcon, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
-    QAbstractItemView, QCheckBox, QComboBox, QDialog, QFrame, QHBoxLayout,
-    QInputDialog, QLabel, QListWidget, QListWidgetItem, QMainWindow, QMenu,
-    QMessageBox, QPushButton, QSizePolicy, QStatusBar, QVBoxLayout, QWidget,
+    QAbstractItemView, QCheckBox, QComboBox, QDialog, QFileDialog, QFrame, QHBoxLayout,
+    QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu,
+    QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy, QSplitter,
+    QStatusBar, QVBoxLayout, QWidget,
 )
 
 import api_server
@@ -21,10 +23,12 @@ from ui.profiles_dialog import ProfilesDialog
 from ui.save_path_widgets import split_paths
 from ui.settings_dialog import SettingsDialog
 from ui.update_flow import UpdateFlow
+from ui.video_player import InlineVideoPlayer
 
 logger = logging.getLogger(__name__)
 
 _UI_DIR = Path(__file__).parent
+_ROW_HEIGHT = 22  # one slot or folder row, in pixels
 _SORT_LABELS = {"modified": "Modified", "created": "Created", "name": "Name", "custom": "Custom"}
 
 def _hotkey_label(key: str) -> str:
@@ -72,6 +76,18 @@ class MainWindow(QMainWindow):
         self._loose_slots: list[storage.SaveSlot] = []
         self._collapsed: set[tuple[str, str, str]] = set()  # (game, profile, folder)
         self._current_slot: Optional[storage.SaveSlot] = None
+        self._actual_video_url: str = ""
+
+        self._notes_save_timer = QTimer(self)
+        self._notes_save_timer.setSingleShot(True)
+        self._notes_save_timer.setInterval(600)
+        self._notes_save_timer.timeout.connect(self._flush_notes)
+
+        self._video_save_timer = QTimer(self)
+        self._video_save_timer.setSingleShot(True)
+        self._video_save_timer.setInterval(600)
+        self._video_save_timer.timeout.connect(self._flush_video)
+
         self._run_mode = False
         self._run_backup_timer = QTimer(self)
         self._run_backup_timer.setInterval(2 * 60 * 1000)
@@ -111,6 +127,7 @@ class MainWindow(QMainWindow):
         self._companion.sort_changed.connect(self._on_remote_sort_changed)
 
         self._build_ui()
+        self._apply_info_panel()
         w, h = self._config.window_width, self._config.window_height
         self.resize(w if w > 0 else 700, h if h > 0 else 580)
 
@@ -156,8 +173,19 @@ class MainWindow(QMainWindow):
         content_layout.addLayout(self._build_top_bar())
         content_layout.addWidget(_Divider())
 
+        splitter = QSplitter(Qt.Horizontal)
+        splitter.setHandleWidth(1)
+        splitter.setChildrenCollapsible(False)
+
         self._slot_panel = self._build_slot_panel()
-        content_layout.addWidget(self._slot_panel, 1)
+        self._info_panel = self._build_info_panel()
+        splitter.addWidget(self._slot_panel)
+        splitter.addWidget(self._info_panel)
+
+        splitter.setSizes([310, 580])
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        content_layout.addWidget(splitter, 1)
 
         content_layout.addWidget(_Divider())
         content_layout.addLayout(self._build_action_bar())
@@ -183,8 +211,11 @@ class MainWindow(QMainWindow):
         _fix_combo_first_click(self.game_combo)
         bar.addWidget(self.game_combo)
 
-        self.add_game_btn = QPushButton("+")
+        self.add_game_btn = QPushButton()
         self.add_game_btn.setObjectName("ghostBtn")
+        self.add_game_btn.setProperty("iconOnly", True)
+        self.add_game_btn.setIcon(QIcon(str(_UI_DIR / "plus.svg")))
+        self.add_game_btn.setIconSize(QSize(14, 14))
         self.add_game_btn.setFixedWidth(36)
         self.add_game_btn.setToolTip("Add a game")
         self.add_game_btn.clicked.connect(self._on_add_game)
@@ -204,8 +235,11 @@ class MainWindow(QMainWindow):
         _fix_combo_first_click(self.profile_combo)
         bar.addWidget(self.profile_combo)
 
-        self.manage_profiles_btn = QPushButton("+")
+        self.manage_profiles_btn = QPushButton()
         self.manage_profiles_btn.setObjectName("ghostBtn")
+        self.manage_profiles_btn.setProperty("iconOnly", True)
+        self.manage_profiles_btn.setIcon(QIcon(str(_UI_DIR / "plus.svg")))
+        self.manage_profiles_btn.setIconSize(QSize(14, 14))
         self.manage_profiles_btn.setFixedWidth(36)
         self.manage_profiles_btn.setToolTip("Add or manage profiles")
         self.manage_profiles_btn.clicked.connect(self._on_manage_profiles)
@@ -279,13 +313,116 @@ class MainWindow(QMainWindow):
         self.slot_list.setDragDropMode(QAbstractItemView.InternalMove)
         self.slot_list.entries_dropped.connect(self._on_entries_dropped)
         self.slot_list.currentRowChanged.connect(self._on_slot_selected)
-        self.slot_list.itemClicked.connect(self._on_item_clicked)
+        self.slot_list.itemDoubleClicked.connect(self._on_item_double_clicked)
         self.slot_list.setContextMenuPolicy(Qt.CustomContextMenu)
         self.slot_list.customContextMenuRequested.connect(self._on_slot_context_menu)
         self.slot_list.installEventFilter(self)
         layout.addWidget(self.slot_list, 1)
 
         return panel
+
+    def _build_info_panel(self) -> QWidget:
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setFrameShape(QFrame.NoFrame)
+
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(8, 0, 8, 0)
+        layout.setSpacing(0)
+
+        lbl = QLabel("Slot details")
+        lbl.setObjectName("panelHeader")
+        layout.addWidget(lbl)
+        layout.addSpacing(10)
+
+        name_row = QHBoxLayout()
+        self.detail_name = QLabel("—")
+        self.detail_name.setObjectName("detailName")
+        name_row.addWidget(self.detail_name, 1)
+        self.rename_btn = QPushButton("Rename")
+        self.rename_btn.setObjectName("ghostBtn")
+        self.rename_btn.setEnabled(False)
+        self.rename_btn.clicked.connect(self._on_rename_slot)
+        name_row.addWidget(self.rename_btn)
+        layout.addLayout(name_row)
+
+        self.detail_time = QLabel("—")
+        self.detail_time.setObjectName("mutedLabel")
+        layout.addWidget(self.detail_time)
+
+        layout.addSpacing(16)
+
+        notes_lbl = QLabel("Notes")
+        notes_lbl.setObjectName("fieldLabel")
+        layout.addWidget(notes_lbl)
+        layout.addSpacing(4)
+
+        self.detail_notes = QPlainTextEdit()
+        self.detail_notes.setObjectName("detailNotes")
+        self.detail_notes.setPlaceholderText("No notes.")
+        self.detail_notes.setMaximumHeight(90)
+        self.detail_notes.textChanged.connect(self._on_notes_changed)
+        layout.addWidget(self.detail_notes)
+
+        layout.addSpacing(16)
+
+        video_lbl = QLabel("Video")
+        video_lbl.setObjectName("fieldLabel")
+        layout.addWidget(video_lbl)
+        layout.addSpacing(4)
+
+        video_row = QHBoxLayout()
+        video_row.setSpacing(6)
+        self.detail_video_url = QLineEdit()
+        self.detail_video_url.setObjectName("detailVideoUrl")
+        self.detail_video_url.setPlaceholderText("YouTube or direct video URL")
+        self.detail_video_url.textChanged.connect(self._on_video_changed)
+        video_row.addWidget(self.detail_video_url, 1)
+
+        self.browse_video_btn = QPushButton("Browse")
+        self.browse_video_btn.setObjectName("ghostBtn")
+        self.browse_video_btn.clicked.connect(self._on_browse_video)
+        video_row.addWidget(self.browse_video_btn)
+
+        self.clear_video_btn = QPushButton("Clear")
+        self.clear_video_btn.setObjectName("ghostBtn")
+        self.clear_video_btn.setEnabled(False)
+        self.clear_video_btn.clicked.connect(self._on_clear_video)
+        video_row.addWidget(self.clear_video_btn)
+        layout.addLayout(video_row)
+
+        self._inline_player = InlineVideoPlayer()
+        self._inline_player.setVisible(False)
+        layout.addWidget(self._inline_player)
+
+        layout.addSpacing(16)
+
+        info_box = QFrame()
+        info_box.setObjectName("infoBox")
+        info_layout = QVBoxLayout(info_box)
+        info_layout.setContentsMargins(12, 10, 12, 10)
+        info_layout.setSpacing(6)
+
+        info_title = QLabel("Game info")
+        info_title.setObjectName("fieldLabel")
+        info_layout.addWidget(info_title)
+
+        self.info_save_path = _InfoRow("Save path", "—")
+        self.info_created = _InfoRow("Created", "—")
+        self.info_modified = _InfoRow("Modified", "—")
+        self.info_file_size = _InfoRow("File size", "—")
+        self.info_ro_status = _InfoRow("Practice", "—")
+
+        for row in (self.info_save_path, self.info_created, self.info_modified, self.info_file_size, self.info_ro_status):
+            info_layout.addWidget(row)
+
+        layout.addWidget(info_box)
+        layout.addStretch()
+
+        scroll.setWidget(panel)
+        return scroll
 
     def _build_action_bar(self) -> QHBoxLayout:
         bar = QHBoxLayout()
@@ -336,7 +473,7 @@ class MainWindow(QMainWindow):
         changed = False
         for name in storage.find_unconfigured_games():
             if name in storage.BUNDLED_GAMES:
-                storage.save_game_config(storage.GameConfig(name, "", "file"))
+                storage.save_game_config(storage.GameConfig(name, "", storage.BUNDLED_GAMES[name]))
                 changed = True
                 self.status_bar.showMessage(
                     f"'{name}' configured automatically — open Settings to set the save path.", 8000
@@ -362,6 +499,7 @@ class MainWindow(QMainWindow):
         """Repopulate the game and profile combos and the slot list, keeping the given selection."""
         _set_combo_items(self.game_combo, [g.name for g in self._games], game)
         self._reload_profiles(profile)
+        self._update_save_path_info()
         self._reload_slots(slot)
 
     def _reload_profiles(self, select: str = "") -> None:
@@ -369,6 +507,10 @@ class MainWindow(QMainWindow):
         _set_combo_items(self.profile_combo, storage.load_profiles(self.game_combo.currentText()), select)
         if self.profile_combo.currentText() != previous:
             self._disable_practice_mode_for_context_switch()
+
+    def _update_save_path_info(self) -> None:
+        self.info_save_path.setVisible(not self._config.hide_paths)
+        self.info_save_path.set_value(_game_path_display(self._get_game_cfg()))
 
     def _disable_practice_mode_for_context_switch(self) -> None:
         """Practice Mode guards one game's live save, so switching game or profile turns it
@@ -379,6 +521,7 @@ class MainWindow(QMainWindow):
     def _on_game_changed(self, _: int) -> None:
         self._disable_practice_mode_for_context_switch()
         self._reload_profiles()
+        self._update_save_path_info()
         self._reload_slots()
 
     def _on_profile_changed(self, _: int) -> None:
@@ -445,7 +588,7 @@ class MainWindow(QMainWindow):
             for entry in self._rows:
                 item = QListWidgetItem()
                 item.setData(Qt.UserRole, entry)
-                item.setSizeHint(QSize(0, 34))
+                item.setSizeHint(QSize(0, _ROW_HEIGHT))
                 if isinstance(entry, storage.SaveFolder):
                     expanded = (game_name, profile_name, entry.name) not in self._collapsed
                     # Folders can be dropped onto but are not dragged themselves.
@@ -520,11 +663,24 @@ class MainWindow(QMainWindow):
     # Event handlers
 
     def _on_slot_selected(self, row: int) -> None:
+        self._flush_notes()
+        self._flush_video()
         slot = self._rows[row] if 0 <= row < len(self._rows) else None
         if not isinstance(slot, storage.SaveSlot):
             self._clear_detail()  # nothing selected, or a folder (folders have no save)
             return
         self._current_slot = slot
+        self.rename_btn.setEnabled(True)
+        self.detail_name.setText(slot.name)
+        self.detail_time.setText(_fmt_dt(slot.date_modified or slot.date_created))
+        self.detail_notes.blockSignals(True)
+        self.detail_notes.setPlainText(slot.notes)
+        self.detail_notes.blockSignals(False)
+        self._set_video_url(slot.video_url)
+        self.info_created.set_value(_fmt_dt(slot.date_created))
+        self.info_modified.set_value(_fmt_dt(slot.date_modified) if slot.date_modified else "—")
+        files = storage.slot_save_files(slot)
+        self.info_file_size.set_value(_fmt_size(sum(f.stat().st_size for f in files)) if files else "—")
         self._maybe_switch_practice_slot(slot)
         self._sync_ro_button()
         self._refresh_overlay()
@@ -549,8 +705,84 @@ class MainWindow(QMainWindow):
 
     def _clear_detail(self) -> None:
         self._current_slot = None
+        self.rename_btn.setEnabled(False)
+        self.detail_name.setText("—")
+        self.detail_time.setText("—")
+        self.detail_notes.blockSignals(True)
+        self.detail_notes.setPlainText("")
+        self.detail_notes.blockSignals(False)
+        self._set_video_url("")
+        self.info_created.set_value("—")
+        self.info_modified.set_value("—")
+        self.info_file_size.set_value("—")
         self._sync_ro_button()
         self._refresh_overlay()
+
+    def _on_notes_changed(self) -> None:
+        self._notes_save_timer.start()
+
+    def _flush_notes(self) -> None:
+        self._notes_save_timer.stop()
+        if self._current_slot is None:
+            return
+        if not self._current_slot.path.exists():
+            return
+        storage.save_notes(self._current_slot, self.detail_notes.toPlainText())
+        self.status_bar.showMessage("Notes saved.", 2000)
+
+    def _set_video_url(self, url: str) -> None:
+        self._actual_video_url = url
+        parsed = QUrl(url.strip()) if url.strip() else QUrl()
+        display = Path(parsed.toLocalFile()).name if parsed.isLocalFile() else url
+        self.detail_video_url.blockSignals(True)
+        self.detail_video_url.setText(display)
+        self.detail_video_url.blockSignals(False)
+        has_url = bool(url.strip())
+        self.clear_video_btn.setEnabled(has_url)
+        if has_url and self._config.show_details:  # a hidden panel never loads a video
+            if url.strip() != self._inline_player.url:
+                self._inline_player.load(url.strip())
+            self._inline_player.setVisible(True)
+            QTimer.singleShot(50, self.update)
+        else:
+            self._inline_player.unload()
+            self._inline_player.setVisible(False)
+        QTimer.singleShot(0, self._sync_minimum_size)
+
+    def _on_video_changed(self) -> None:
+        text = self.detail_video_url.text().strip()
+        if not QUrl(text).isLocalFile():
+            self._actual_video_url = text
+        self.clear_video_btn.setEnabled(bool(self._actual_video_url))
+        self._video_save_timer.start()
+
+    def _flush_video(self) -> None:
+        self._video_save_timer.stop()
+        if self._current_slot is None:
+            return
+        if not self._current_slot.path.exists():
+            return
+        url = self._actual_video_url
+        if url != self._current_slot.video_url:
+            storage.save_video_url(self._current_slot, url)
+            self.status_bar.showMessage("Video link saved.", 2000)
+        self._set_video_url(url)
+
+    def _on_browse_video(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select video file", "",
+            "Video files (*.mp4 *.webm *.ogg *.mov *.m4v *.mkv);;All files (*)",
+        )
+        if path:
+            self._set_video_url(QUrl.fromLocalFile(path).toString())
+            self._video_save_timer.start()
+
+    def _on_clear_video(self) -> None:
+        self._inline_player.unload()
+        self._inline_player.setVisible(False)
+        self.detail_video_url.clear()
+        self._flush_video()
+        QTimer.singleShot(0, self._sync_minimum_size)
 
     def _notify(self, text: str, timeout: int = 0) -> None:
         """Show a status message, mirrored in the overlay while it's visible."""
@@ -568,6 +800,12 @@ class MainWindow(QMainWindow):
         """Show Practice Mode's on/off state; it can always be turned off, whatever is selected."""
         is_active = self._guard_slot is not None
         save_files = storage.slot_save_files(self._current_slot) if self._current_slot else []
+        if is_active:
+            self.info_ro_status.set_value("Active")
+        elif save_files:
+            self.info_ro_status.set_value("Inactive")
+        else:
+            self.info_ro_status.set_value("—")
         with QSignalBlocker(self.ro_btn):
             self.ro_btn.setChecked(is_active)
         self.ro_btn.setText(self._ro_btn_text(is_active))
@@ -874,6 +1112,8 @@ class MainWindow(QMainWindow):
                    else f"Permanently delete '{slot.name}'?\n\nThis cannot be undone.")
             if not self._confirm("delete", "Delete slot", msg, disable_key="confirm_delete"):
                 return
+        self._flush_notes()
+        self._flush_video()
         self._current_slot = None
         try:
             storage.delete_slot(slot, soft=soft)
@@ -923,6 +1163,8 @@ class MainWindow(QMainWindow):
             return
         previous = self.profile_combo.currentText()
         ProfilesDialog(game, self).exec()
+        self._flush_notes()
+        self._flush_video()
         self._current_slot = None
         self._reload_profiles(previous)
         self._reload_slots()
@@ -1118,8 +1360,8 @@ class MainWindow(QMainWindow):
         self._reload_slots(select_folder=folder.name)
         self._notify(f"Created folder '{folder.name}'.")
 
-    def _on_item_clicked(self, item: QListWidgetItem) -> None:
-        """Clicking a folder (which also highlights it) collapses or expands it."""
+    def _on_item_double_clicked(self, item: QListWidgetItem) -> None:
+        """Double-clicking a folder collapses or expands it (one click only highlights it)."""
         entry = item.data(Qt.UserRole)
         if not isinstance(entry, storage.SaveFolder):
             return
@@ -1185,6 +1427,8 @@ class MainWindow(QMainWindow):
         """Move slots into a folder ("" = top level). In Custom sort, `before` is the slot
         they should sit next to (after it if `after`)."""
         game, profile = self.game_combo.currentText(), self.profile_combo.currentText()
+        self._flush_notes()
+        self._flush_video()
         names = tuple(s.name for s in slots)
         if before in names:  # dropped onto one of the dragged slots
             before = ""
@@ -1298,6 +1542,8 @@ class MainWindow(QMainWindow):
             return
 
         if move:
+            self._flush_notes()
+            self._flush_video()
             self._current_slot = None
             try:
                 storage.delete_slot(slot, soft=self._config.soft_delete)
@@ -1597,6 +1843,7 @@ class MainWindow(QMainWindow):
         self._load_data(prev_game, prev_profile, prev_slot)
         if self.game_combo.currentText() != prev_game:
             self._disable_practice_mode_for_context_switch()
+        self._apply_info_panel()
         self._restore_hotkeys()
         self._apply_companion_server()
         self.status_bar.showMessage("Settings saved.")
@@ -1647,6 +1894,25 @@ class MainWindow(QMainWindow):
                 return True
         return super().eventFilter(obj, event)
 
+    def _apply_info_panel(self) -> None:
+        show = self._config.show_details
+        if not show:
+            self._inline_player.unload()
+        self._info_panel.setVisible(show)
+        # Next to the details the slot list is a column; without them it fills the window.
+        self._slot_panel.setMinimumWidth(340 if show else 0)
+        self._slot_panel.setMaximumWidth(380 if show else 16777215)
+        self._slot_panel.layout().setContentsMargins(0, 0, 8 if show else 0, 0)
+        QTimer.singleShot(0, self._sync_minimum_size)
+
+    def _sync_minimum_size(self) -> None:
+        hint = self.minimumSizeHint()
+        self.setMinimumSize(hint)
+        w = max(self.width(), hint.width())
+        h = max(self.height(), hint.height())
+        if w != self.width() or h != self.height():
+            self.resize(w, h)
+
     def _get_game_cfg(self) -> Optional[storage.GameConfig]:
         game_name = self.game_combo.currentText()
         return next((g for g in self._games if g.name == game_name), None)
@@ -1672,6 +1938,10 @@ class MainWindow(QMainWindow):
             return False
         return True
 
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._inline_player.update_height(self.height())
+
     def closeEvent(self, event) -> None:
         logger.info("Application closing: game=%r profile=%r slot=%r",
                     self.game_combo.currentText(),
@@ -1684,6 +1954,8 @@ class MainWindow(QMainWindow):
         self._overlay_action_hotkeys.stop()
         self._overlay_rename_input.stop()
         self._overlay.close()
+        self._flush_notes()
+        self._flush_video()
         self._config.last_game = self.game_combo.currentText()
         self._config.last_profile = self.profile_combo.currentText()
         self._config.last_slot = self._current_slot_name()
@@ -1700,6 +1972,15 @@ class MainWindow(QMainWindow):
             logger.warning("Stylesheet not found: %s", path)
 
 
+def _game_path_display(cfg: Optional[storage.GameConfig]) -> str:
+    if not cfg:
+        return "—"
+    if cfg.save_mode == "files":
+        n = len(cfg.save_paths)
+        return f"{n} file{'s' if n != 1 else ''}" if n else "—"
+    return cfg.save_path or "—"
+
+
 def _live_game_files(game_cfg: storage.GameConfig) -> list[Path]:
     """The live save files that Practice Mode watches."""
     if game_cfg.save_mode == "file":
@@ -1713,12 +1994,26 @@ def _live_game_files(game_cfg: storage.GameConfig) -> list[Path]:
     return []
 
 
+def _fmt_size(n: int) -> str:
+    if n < 1024:
+        return f"{n} B"
+    if n < 1024 * 1024:
+        return f"{n / 1024:.1f} KB"
+    return f"{n / (1024 * 1024):.2f} MB"
+
+
+def _fmt_dt(dt: Optional[datetime]) -> str:
+    if dt is None:
+        return "—"
+    return dt.strftime("%Y-%m-%d  %H:%M:%S")
+
+
 class _SlotItem(QWidget):
     def __init__(self, name: str, indented: bool = False) -> None:
         super().__init__()
         layout = QVBoxLayout(self)
         # Slots inside a folder are shifted right so they read as its children.
-        layout.setContentsMargins(34 if indented else 12, 6, 12, 6)
+        layout.setContentsMargins(34 if indented else 12, 2, 12, 2)
         name_lbl = QLabel(name)
         name_lbl.setStyleSheet("font-size: 13px; font-weight: 500; color: #d4cfc8;")
         layout.addWidget(name_lbl)
@@ -1730,7 +2025,7 @@ class _FolderItem(QWidget):
     def __init__(self, name: str, expanded: bool) -> None:
         super().__init__()
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(10, 6, 12, 6)
+        layout.setContentsMargins(10, 2, 12, 2)
         layout.setSpacing(6)
 
         arrow = QLabel("▾" if expanded else "▸")
@@ -1778,6 +2073,29 @@ class _SlotListWidget(QListWidget):
         # Not handled by Qt, so it can't remove or duplicate the dragged rows.
         event.ignore()
         self.entries_dropped.emit(rows, target_row, where)
+
+
+class _InfoRow(QWidget):
+    """Label + value pair inside the info box."""
+
+    def __init__(self, label: str, value: str) -> None:
+        super().__init__()
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+
+        self._lbl = QLabel(label)
+        self._lbl.setObjectName("fieldLabel")
+        self._lbl.setFixedWidth(72)
+        layout.addWidget(self._lbl)
+
+        self._val = QLabel(value)
+        self._val.setStyleSheet("color: #9999aa; font-size: 12px;")
+        self._val.setWordWrap(True)
+        layout.addWidget(self._val, 1)
+
+    def set_value(self, value: str) -> None:
+        self._val.setText(value)
 
 
 class _Divider(QFrame):

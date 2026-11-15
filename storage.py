@@ -30,15 +30,17 @@ _MAX_BACKUPS = 3
 
 SORT_MODES = ("name", "created", "modified", "custom")
 
-# Games whose saves/ folder ships in the release zip. They're all single-file
-# saves, so a fresh install configures them as "file" mode without asking.
+# Games whose saves/ folder ships in the release zip, with how each stores its save
+# ("file" or "folder"). A fresh install configures them without asking.
 BUNDLED_GAMES = {
-    "Armored Core VI",
-    "Dark Souls II Scholar of the First Sin",
-    "Dark Souls III",
-    "Dark Souls Remastered",
-    "Elden Ring",
-    "Sekiro",
+    "Armored Core VI": "file",
+    "Bloodborne": "folder",
+    "Dark Souls II Scholar of the First Sin": "file",
+    "Dark Souls III": "file",
+    "Dark Souls Remastered": "file",
+    "Demon's Souls": "folder",
+    "Elden Ring": "file",
+    "Sekiro": "file",
 }
 
 # Slot and profile names become directory names, so reject path separators,

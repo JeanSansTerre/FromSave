@@ -31,7 +31,7 @@ class Config:
     global_hotkeys_enabled: bool = False
     protect_warning_acknowledged: bool = False
     soft_delete: bool = True
-    hide_details: bool = False
+    show_details: bool = False
     window_width: int = 0
     window_height: int = 0
     check_updates_on_startup: bool = True
