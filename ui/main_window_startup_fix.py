@@ -1,17 +1,17 @@
 """Compatibility repair for UI builder methods omitted from an experimental branch edit.
 
-This keeps the startup path small and restores the builder methods that MainWindow.__init__
-expects, without changing its save/group behavior.
+This restores the builder methods that MainWindow.__init__ expects so the app can start.
 """
-from PySide6.QtCore import QSize, Qt
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QCheckBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit, QPushButton,
+    QFrame, QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit, QPushButton,
     QScrollArea, QVBoxLayout, QWidget,
 )
 
 
 def install() -> None:
-    from ui.main_window import MainWindow, _Divider, _InfoRow
+    from ui.main_window import MainWindow, _InfoRow
+    from ui.video_player import InlineVideoPlayer
 
     def _build_info_panel(self):
         scroll = QScrollArea()
@@ -79,7 +79,7 @@ def install() -> None:
         video_row.addWidget(self.clear_video_btn)
         layout.addLayout(video_row)
 
-        self._inline_player = self._create_inline_player()
+        self._inline_player = InlineVideoPlayer()
         self._inline_player.setVisible(False)
         layout.addWidget(self._inline_player)
         layout.addSpacing(16)
@@ -106,14 +106,9 @@ def install() -> None:
         scroll.setWidget(panel)
         return scroll
 
-    def _create_inline_player(self):
-        from ui.video_player import InlineVideoPlayer
-        return InlineVideoPlayer()
-
     def _build_action_bar(self):
         bar = QHBoxLayout()
         bar.setSpacing(6)
-
         self.import_btn = QPushButton("Import Save")
         self.import_btn.setObjectName("primaryBtn")
         self.import_btn.clicked.connect(self._on_import_save)
