@@ -2,15 +2,14 @@ import dataclasses
 from dataclasses import dataclass
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QUrl
-from PySide6.QtGui import QDesktopServices, QKeySequence
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QKeySequence
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QFrame, QGroupBox, QHBoxLayout, QKeySequenceEdit, QLabel,
     QLineEdit, QMessageBox, QPushButton, QRadioButton, QScrollArea, QSlider, QVBoxLayout,
     QWidget,
 )
 
-import api_server
 import config
 import storage
 from ui.add_game_dialog import AddGameDialog
@@ -69,21 +68,13 @@ class _GameRow:
 
 
 class SettingsDialog(QDialog):
-    """Edits a copy of the config and game list; read the results after exec().
+    """Edits a copy of the config and game list; read the results after exec()."""
 
-    The companion checkbox is the exception: it applies immediately through
-    on_companion_toggle (which returns the pairing code), since it controls a live server.
-    """
-
-    def __init__(self, cfg: config.Config, games: list[storage.GameConfig], parent=None,
-                 on_companion_toggle=None, on_companion_notice_shown=None):
+    def __init__(self, cfg: config.Config, games: list[storage.GameConfig], parent=None):
         super().__init__(parent)
         self.setWindowTitle("Settings")
         self.setMinimumWidth(620)
         self.setMaximumHeight(700)
-        self._on_companion_toggle = on_companion_toggle
-        self._on_companion_notice_shown = on_companion_notice_shown
-        self._companion_info_visible = False
         self._cfg = dataclasses.replace(cfg)
         self._checkboxes: dict[str, QCheckBox] = {}
         self._hotkey_edits: dict[str, QKeySequenceEdit] = {}
@@ -122,7 +113,6 @@ class SettingsDialog(QDialog):
         layout.setContentsMargins(16, 16, 16, 12)
 
         layout.addWidget(self._build_updates_box())
-        layout.addWidget(self._build_companion_box())
 
         behaviour_box = QGroupBox("Behaviour")
         behaviour_layout = QVBoxLayout(behaviour_box)
@@ -207,43 +197,6 @@ class SettingsDialog(QDialog):
         box_layout.addLayout(row)
         self._add_checkbox(box_layout, "check_updates_on_startup",
                            "Automatically check for updates when opening")
-        return box
-
-    def _build_companion_box(self) -> QGroupBox:
-        box = QGroupBox("Companion app")
-        box_layout = QVBoxLayout(box)
-        self._companion_enabled = QCheckBox("Allow the phone companion app to connect over Wi-Fi")
-        self._companion_enabled.setChecked(self._cfg.companion_enabled)
-        self._companion_enabled.toggled.connect(self._on_companion_toggled)
-        box_layout.addWidget(self._companion_enabled)
-
-        get_app_btn = QPushButton("Get the companion app ↗")
-        get_app_btn.setObjectName("ghostBtn")
-        get_app_btn.clicked.connect(lambda: QDesktopServices.openUrl(
-            QUrl("https://github.com/JacksonW98/fromsave-companion/releases/latest")
-        ))
-        self._companion_reveal_btn = QPushButton("Show connection info")
-        self._companion_reveal_btn.setObjectName("ghostBtn")
-        self._companion_reveal_btn.clicked.connect(self._on_companion_reveal)
-        for btn in (get_app_btn, self._companion_reveal_btn):
-            row = QHBoxLayout()
-            row.addWidget(btn)
-            row.addStretch()
-            box_layout.addLayout(row)
-
-        self._companion_info = QLabel("")
-        self._companion_info.setStyleSheet("color: #888899;")
-        self._companion_info.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        box_layout.addWidget(self._companion_info)
-
-        hint = QLabel(
-            "The address and code shown are private to your home network — "
-            "they are not visible to the internet and reveal nothing about you."
-        )
-        hint.setWordWrap(True)
-        hint.setStyleSheet("color: #666677; font-size: 11px;")
-        box_layout.addWidget(hint)
-        self._refresh_companion_info()
         return box
 
     def _build_overlay_box(self) -> QGroupBox:
@@ -383,47 +336,8 @@ class SettingsDialog(QDialog):
             return
         self._add_game_row(name, mode, path_text)
 
-    def _on_companion_toggled(self, checked: bool) -> None:
-        if checked and not self._cfg.companion_firewall_notice_shown:
-            QMessageBox.information(
-                self, "Companion app",
-                "Windows may show a popup asking to allow FromSave network access.\n\n"
-                "Make sure you click Allow — if you click Cancel or Deny, the phone "
-                "app won't be able to connect, and you'll need to fix it manually in "
-                "Windows Firewall settings."
-            )
-            self._cfg.companion_firewall_notice_shown = True
-            if self._on_companion_notice_shown is not None:
-                self._on_companion_notice_shown()
-        self._cfg.companion_enabled = checked
-        if self._on_companion_toggle is not None:
-            if token := self._on_companion_toggle(checked):
-                self._cfg.companion_token = token
-        if not checked:
-            self._companion_info_visible = False
-        self._refresh_companion_info()
-
-    def _on_companion_reveal(self) -> None:
-        self._companion_info_visible = not self._companion_info_visible
-        self._refresh_companion_info()
-
-    def _refresh_companion_info(self) -> None:
-        enabled = self._companion_enabled.isChecked()
-        show = enabled and self._companion_info_visible
-        self._companion_reveal_btn.setEnabled(enabled)
-        self._companion_reveal_btn.setText("Hide connection info" if show else "Show connection info")
-        self._companion_info.setVisible(show)
-        if not enabled:
-            return
-        if not self._cfg.companion_token:
-            self._cfg.companion_token = api_server.generate_pair_code()
-        self._companion_info.setText(
-            f"In the phone app, connect to  {api_server.local_ip()}:{self._cfg.companion_port}"
-            f"  with pairing code  {self._cfg.companion_token}"
-        )
-
     def _form_values(self) -> dict:
-        """Config field values currently shown by the form (except the companion toggle)."""
+        """Config field values currently shown by the form."""
         values = {field: cb.isChecked() for field, cb in self._checkboxes.items()}
         values.update({field: e.keySequence().toString() for field, e in self._hotkey_edits.items()})
         values["auto_name_imports"] = self._auto_name.isChecked()
@@ -447,7 +361,6 @@ class SettingsDialog(QDialog):
     def _on_save(self) -> None:
         for field, value in self._form_values().items():
             setattr(self._cfg, field, value)
-        self._cfg.companion_enabled = self._companion_enabled.isChecked()
         self.accept()
 
     def _on_check_updates(self) -> None:

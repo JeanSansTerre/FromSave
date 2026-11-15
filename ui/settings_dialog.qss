@@ -20,46 +20,90 @@ QGroupBox::title {
   top: 1px;
 }
 
+/* ── Checkboxes and radio buttons ── */
 QCheckBox, QRadioButton {
   background: transparent;
   color: #d4cfc8;
   spacing: 8px;
   font-size: 13px;
 }
-
+QCheckBox::indicator, QRadioButton::indicator {
+  width: 14px;
+  height: 14px;
+  border: 2px solid #8a8aa0;
+  background: #26262e;
+}
 QCheckBox::indicator {
-  width: 15px;
-  height: 15px;
-  border: 1.5px solid #555566;
-  border-radius: 3px;
-  background: #1f1f25;
+  border-radius: 4px;
 }
-
-QCheckBox::indicator:hover {
-  border-color: #b8962e;
+QRadioButton::indicator {
+  border-radius: 9px;
 }
-
+QCheckBox::indicator:hover, QRadioButton::indicator:hover {
+  border-color: #d4b24a;
+}
 QCheckBox::indicator:checked {
   background: #b8962e;
   border-color: #b8962e;
   image: url({ui_dir}/check.svg);
 }
-
-QRadioButton::indicator {
-  width: 15px;
-  height: 15px;
-  border: 1.5px solid #555566;
-  border-radius: 8px;
-  background: #1f1f25;
-}
-
-QRadioButton::indicator:hover {
-  border-color: #b8962e;
-}
-
 QRadioButton::indicator:checked {
-  border: 1.5px solid #b8962e;
+  border-color: #b8962e;
   background: qradialgradient(cx:0.5, cy:0.5, radius:0.5, fx:0.5, fy:0.5,
-    stop:0 #b8962e, stop:0.38 #b8962e,
-    stop:0.45 #1f1f25, stop:1 #1f1f25);
+    stop:0 #16161a, stop:0.3 #16161a,
+    stop:0.4 #b8962e, stop:1 #b8962e);
+}
+
+/* ── Scrollbar ── */
+QScrollBar:vertical {
+  background: #1b1b21;
+  width: 14px;
+  margin: 0;
+  border: none;
+}
+QScrollBar::handle:vertical {
+  background: #4d4d60;
+  border-radius: 5px;
+  min-height: 40px;
+  margin: 2px;
+}
+QScrollBar::handle:vertical:hover {
+  background: #6e6e88;
+}
+QScrollBar::handle:vertical:pressed {
+  background: #b8962e;
+}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+  height: 0;
+  border: none;
+  background: none;
+}
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+  background: none;
+}
+QScrollBar:horizontal {
+  background: #1b1b21;
+  height: 14px;
+  margin: 0;
+  border: none;
+}
+QScrollBar::handle:horizontal {
+  background: #4d4d60;
+  border-radius: 5px;
+  min-width: 40px;
+  margin: 2px;
+}
+QScrollBar::handle:horizontal:hover {
+  background: #6e6e88;
+}
+QScrollBar::handle:horizontal:pressed {
+  background: #b8962e;
+}
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+  width: 0;
+  border: none;
+  background: none;
+}
+QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
+  background: none;
 }

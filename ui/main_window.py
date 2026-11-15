@@ -12,7 +12,6 @@ from PySide6.QtWidgets import (
     QStatusBar, QVBoxLayout, QWidget,
 )
 
-import api_server
 import config
 import storage
 from hotkeys import GlobalHotkeyListener, GlobalTextInputListener, is_wayland_session
@@ -122,10 +121,6 @@ class MainWindow(QMainWindow):
         self._overlay_rename_input.submitted.connect(self._on_overlay_text_submitted)
         self._overlay_rename_input.cancelled.connect(self._cancel_overlay_text_entry)
 
-        self._companion = api_server.CompanionServer(self)
-        self._companion.saves_changed.connect(self._on_remote_saves_changed)
-        self._companion.sort_changed.connect(self._on_remote_sort_changed)
-
         self._build_ui()
         self._apply_info_panel()
         w, h = self._config.window_width, self._config.window_height
@@ -149,7 +144,6 @@ class MainWindow(QMainWindow):
         self.apply_stylesheet()
         self._apply_hotkeys()
         self._apply_overlay_toggle_hotkey()
-        self._apply_companion_server()
         QTimer.singleShot(0, self._prompt_unconfigured_games)
         self._startup_update = UpdateFlow(self, quiet=True)
         if self._config.check_updates_on_startup:
@@ -1770,51 +1764,6 @@ class MainWindow(QMainWindow):
         self._config.overlay_pos_y = y
         config.save_config(self._config)
 
-    def _set_companion_enabled_live(self, enabled: bool) -> str:
-        """Settings callback: start/stop the server and save just this setting.
-        Returns the pairing code."""
-        self._config.companion_enabled = enabled
-        if enabled and not self._config.companion_token:
-            self._config.companion_token = api_server.generate_pair_code()
-        config.save_config(self._config)
-        self._apply_companion_server()
-        return self._config.companion_token
-
-    def _mark_companion_notice_shown(self) -> None:
-        """Settings callback: saved immediately so it sticks even if Settings is cancelled."""
-        self._config.companion_firewall_notice_shown = True
-        config.save_config(self._config)
-
-    def _apply_companion_server(self) -> None:
-        if self._config.companion_enabled:
-            if not self._config.companion_token:
-                self._config.companion_token = api_server.generate_pair_code()
-                config.save_config(self._config)
-            started = self._companion.start(
-                self._config.companion_port, self._config.companion_token
-            )
-            if started:
-                self.status_bar.showMessage(
-                    "Companion app enabled — connection info is in Settings.", 6000)
-            else:
-                self.status_bar.showMessage("Companion server failed to start.", 6000)
-        else:
-            self._companion.stop()
-
-    def _on_remote_saves_changed(self) -> None:
-        self._reload_profiles(self.profile_combo.currentText())
-        self._reload_slots(self._current_slot_name())
-        self._refresh_overlay()
-        self.status_bar.showMessage("Saves updated from companion app.", 4000)
-
-    def _on_remote_sort_changed(self, mode: str, desc: bool) -> None:
-        """The server already saved the new sort to disk; mirror it here."""
-        self._config.slot_sort = mode
-        self._config.slot_sort_desc = desc
-        self._sync_sort_widgets()
-        self._reload_slots(self._current_slot_name())
-        self.status_bar.showMessage("Sort changed from companion app.", 4000)
-
     def _on_open_settings(self) -> None:
         self._suspend_hotkeys()
         prev_game = self.game_combo.currentText()
@@ -1822,9 +1771,7 @@ class MainWindow(QMainWindow):
         prev_slot = self._current_slot_name()
 
         self._games = storage.load_games()
-        dlg = SettingsDialog(self._config, self._games, self,
-                             on_companion_toggle=self._set_companion_enabled_live,
-                             on_companion_notice_shown=self._mark_companion_notice_shown)
+        dlg = SettingsDialog(self._config, self._games, self)
         if not dlg.exec():
             self._restore_hotkeys()
             return
@@ -1845,7 +1792,6 @@ class MainWindow(QMainWindow):
             self._disable_practice_mode_for_context_switch()
         self._apply_info_panel()
         self._restore_hotkeys()
-        self._apply_companion_server()
         self.status_bar.showMessage("Settings saved.")
 
     def _ro_btn_text(self, is_on: bool) -> str:
@@ -1948,7 +1894,6 @@ class MainWindow(QMainWindow):
                     self.profile_combo.currentText(),
                     self._current_slot_name())
         self._run_backup_timer.stop()
-        self._companion.stop()
         self._global_hotkeys.stop()
         self._overlay_toggle_hotkey.stop()
         self._overlay_action_hotkeys.stop()
@@ -1967,7 +1912,7 @@ class MainWindow(QMainWindow):
     def apply_stylesheet(self) -> None:
         path = _UI_DIR / "main_window.qtt"
         try:
-            self.setStyleSheet(path.read_text())
+            self.setStyleSheet(path.read_text().replace("{ui_dir}", _UI_DIR.as_posix()))
         except FileNotFoundError:
             logger.warning("Stylesheet not found: %s", path)
 

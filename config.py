@@ -46,10 +46,6 @@ class Config:
     overlay_opacity: float = 0.85
     overlay_pos_x: int = -1
     overlay_pos_y: int = -1
-    companion_enabled: bool = False
-    companion_port: int = 8765
-    companion_token: str = ""
-    companion_firewall_notice_shown: bool = False
 
 
 def load_config() -> Config:
