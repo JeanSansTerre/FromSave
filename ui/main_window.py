@@ -1,9 +1,9 @@
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
-from PySide6.QtCore import QEvent, QFileSystemWatcher, QSignalBlocker, QSize, Qt, QTimer, QUrl
+from PySide6.QtCore import QEvent, QFileSystemWatcher, QSignalBlocker, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QIcon, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QDialog, QFileDialog, QFrame, QHBoxLayout,
@@ -67,7 +67,11 @@ class MainWindow(QMainWindow):
 
         self._config = config.load_config()
         self._games = storage.load_games()
-        self._slots: list[storage.SaveSlot] = []
+        # What the slot list shows, one entry per row: folders and the slots under them.
+        self._rows: list[Union[storage.SaveFolder, storage.SaveSlot]] = []
+        self._folders: list[storage.SaveFolder] = []
+        self._loose_slots: list[storage.SaveSlot] = []
+        self._collapsed: set[tuple[str, str, str]] = set()  # (game, profile, folder)
         self._current_slot: Optional[storage.SaveSlot] = None
         self._actual_video_url: str = ""
 
@@ -273,12 +277,30 @@ class MainWindow(QMainWindow):
 
         layout.addLayout(header)
 
-        self.slot_list = QListWidget()
+        folder_row = QHBoxLayout()
+        self.add_folder_btn = QPushButton("+ Folder")
+        self.add_folder_btn.setObjectName("ghostBtn")
+        self.add_folder_btn.setIcon(QIcon(str(_UI_DIR / "folder.svg")))
+        self.add_folder_btn.setIconSize(QSize(14, 14))
+        self.add_folder_btn.setToolTip("Create a folder to group slots in this profile")
+        self.add_folder_btn.clicked.connect(self._on_add_folder)
+        folder_row.addWidget(self.add_folder_btn)
+        folder_row.addStretch()
+        layout.addLayout(folder_row)
+
+        self.slot_list = _SlotListWidget()
         self.slot_list.setAlternatingRowColors(False)
         self.slot_list.setSelectionMode(QAbstractItemView.SingleSelection)
         self.slot_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        # Drag a slot onto a folder to file it there (or onto a top-level slot to take
+        # it out); in Custom sort the drop position also sets the slot's order.
+        self.slot_list.setDragEnabled(True)
+        self.slot_list.setAcceptDrops(True)
+        self.slot_list.setDropIndicatorShown(True)
+        self.slot_list.setDragDropMode(QAbstractItemView.InternalMove)
+        self.slot_list.entry_dropped.connect(self._on_entry_dropped)
         self.slot_list.currentRowChanged.connect(self._on_slot_selected)
-        self.slot_list.model().rowsMoved.connect(self._on_rows_moved)
+        self.slot_list.itemClicked.connect(self._on_item_clicked)
         self.slot_list.setContextMenuPolicy(Qt.CustomContextMenu)
         self.slot_list.customContextMenuRequested.connect(self._on_slot_context_menu)
         self.slot_list.installEventFilter(self)
@@ -518,76 +540,100 @@ class MainWindow(QMainWindow):
         self._sync_sort_widgets()
         self._reload_slots(self._current_slot_name())
 
-    def _on_rows_moved(self, *_) -> None:
-        if self._config.slot_sort != "custom":
-            return
-        self._slots = [self.slot_list.item(i).data(Qt.UserRole) for i in range(self.slot_list.count())]
-        storage.save_slot_order(
-            self.game_combo.currentText(),
-            self.profile_combo.currentText(),
-            [s.name for s in self._slots],
-        )
-        # Dragging drops the item widgets, so recreate them once the move settles.
-        QTimer.singleShot(0, self._reattach_slot_widgets)
-
-    def _reattach_slot_widgets(self) -> None:
-        for i in range(self.slot_list.count()):
-            item = self.slot_list.item(i)
-            self.slot_list.setItemWidget(item, _SlotItem(item.data(Qt.UserRole).name))
-
-    def _reload_slots(self, select_slot: str = "") -> None:
+    def _reload_slots(self, select_slot: str = "", select_folder: str = "") -> None:
+        """Re-read the profile from disk and rebuild the list, selecting a slot (or folder)."""
         game_name = self.game_combo.currentText()
         profile_name = self.profile_combo.currentText()
-        self._slots = (
-            storage.load_sorted_slots(game_name, profile_name,
-                                      self._config.slot_sort, self._config.slot_sort_desc)
-            if game_name and profile_name else []
-        )
-        self.slot_list.setDragDropMode(
-            QAbstractItemView.InternalMove if self._config.slot_sort == "custom"
-            else QAbstractItemView.NoDragDrop
-        )
+        if game_name and profile_name:
+            self._folders, self._loose_slots = storage.load_profile_tree(
+                game_name, profile_name, self._config.slot_sort, self._config.slot_sort_desc)
+        else:
+            self._folders, self._loose_slots = [], []
+        self._populate_list(select_slot, select_folder)
+
+    def _populate_list(self, select_slot: str = "", select_folder: str = "") -> None:
+        """Rebuild the list rows from the loaded folders and slots (no disk access)."""
+        game_name = self.game_combo.currentText()
+        profile_name = self.profile_combo.currentText()
+
+        # Never hide the slot that has to be selected inside a collapsed folder.
+        for folder in self._folders:
+            if any(s.name == select_slot for s in folder.slots):
+                self._collapsed.discard((game_name, profile_name, folder.name))
+
+        self._rows = []
+        for folder in self._folders:
+            self._rows.append(folder)
+            if (game_name, profile_name, folder.name) not in self._collapsed:
+                self._rows.extend(folder.slots)
+        self._rows.extend(self._loose_slots)
 
         with QSignalBlocker(self.slot_list):
             self.slot_list.clear()
-            for slot in self._slots:
+            for entry in self._rows:
                 item = QListWidgetItem()
-                item.setData(Qt.UserRole, slot)
+                item.setData(Qt.UserRole, entry)
                 item.setSizeHint(QSize(0, 34))
-                self.slot_list.addItem(item)
-                self.slot_list.setItemWidget(item, _SlotItem(slot.name))
+                if isinstance(entry, storage.SaveFolder):
+                    expanded = (game_name, profile_name, entry.name) not in self._collapsed
+                    # Folders can be dropped onto but are not dragged themselves.
+                    item.setFlags(item.flags() & ~Qt.ItemIsDragEnabled)
+                    self.slot_list.addItem(item)
+                    self.slot_list.setItemWidget(item, _FolderItem(entry.name, expanded))
+                else:
+                    self.slot_list.addItem(item)
+                    self.slot_list.setItemWidget(item, _SlotItem(entry.name, bool(entry.folder)))
 
-        if self._slots:
-            names = [s.name for s in self._slots]
-            target = names.index(select_slot) if select_slot in names else 0
+        target = -1
+        for row, entry in enumerate(self._rows):
+            if select_slot and isinstance(entry, storage.SaveSlot) and entry.name == select_slot:
+                target = row
+                break
+            if select_folder and isinstance(entry, storage.SaveFolder) and entry.name == select_folder:
+                target = row
+                break
+        if target < 0 and not select_folder:
+            target = next((r for r, e in enumerate(self._rows) if isinstance(e, storage.SaveSlot)), -1)
+
+        if target >= 0:
             self.slot_list.setCurrentRow(target)
             self._on_slot_selected(target)
         else:
             self._clear_detail()
 
-    def _selected_slot(self) -> Optional[storage.SaveSlot]:
+    def _visible_slots(self) -> list[storage.SaveSlot]:
+        """Slots currently shown in the list (not those hidden in collapsed folders)."""
+        return [e for e in self._rows if isinstance(e, storage.SaveSlot)]
+
+    def _selected_entry(self) -> Optional[Union[storage.SaveFolder, storage.SaveSlot]]:
         row = self.slot_list.currentRow()
-        return self._slots[row] if 0 <= row < len(self._slots) else None
+        return self._rows[row] if 0 <= row < len(self._rows) else None
+
+    def _selected_slot(self) -> Optional[storage.SaveSlot]:
+        entry = self._selected_entry()
+        return entry if isinstance(entry, storage.SaveSlot) else None
 
     def _select_next_slot(self) -> None:
-        row = self.slot_list.currentRow()
-        if row < self.slot_list.count() - 1:
-            self.slot_list.setCurrentRow(row + 1)
+        for row in range(self.slot_list.currentRow() + 1, len(self._rows)):
+            if isinstance(self._rows[row], storage.SaveSlot):
+                self.slot_list.setCurrentRow(row)
+                return
 
     def _select_prev_slot(self) -> None:
-        row = self.slot_list.currentRow()
-        if row > 0:
-            self.slot_list.setCurrentRow(row - 1)
+        for row in range(self.slot_list.currentRow() - 1, -1, -1):
+            if isinstance(self._rows[row], storage.SaveSlot):
+                self.slot_list.setCurrentRow(row)
+                return
 
     # Event handlers
 
     def _on_slot_selected(self, row: int) -> None:
         self._flush_notes()
         self._flush_video()
-        if row < 0 or row >= len(self._slots):
-            self._clear_detail()
+        slot = self._rows[row] if 0 <= row < len(self._rows) else None
+        if not isinstance(slot, storage.SaveSlot):
+            self._clear_detail()  # nothing selected, or a folder (folders have no save)
             return
-        slot = self._slots[row]
         self._current_slot = slot
         self.rename_btn.setEnabled(True)
         self.detail_name.setText(slot.name)
@@ -913,8 +959,8 @@ class MainWindow(QMainWindow):
 
     def _import_as(self, cfg: storage.GameConfig, profile: str, name: str) -> bool:
         """Import the live save as a new slot and select it. Returns whether it succeeded."""
-        if (storage.SAVES_DIR / cfg.name / profile / name).exists():
-            self._notify(f"A slot named '{name}' already exists.")
+        if storage.name_taken(cfg.name, profile, name):
+            self._notify(f"A slot or folder named '{name}' already exists.")
             return False
         try:
             storage.import_save(cfg.name, profile, name, cfg)
@@ -1017,11 +1063,14 @@ class MainWindow(QMainWindow):
         self._notify(f"Loaded '{slot.name}' to game save.")
 
     def _on_delete_slot(self) -> None:
-        row = self.slot_list.currentRow()
-        if row < 0 or row >= len(self._slots):
+        slot = self._selected_slot()
+        if slot is None:
             self.status_bar.showMessage("No slot selected.")
             return
-        slot = self._slots[row]
+        visible = self._visible_slots()
+        index = visible.index(slot)
+        neighbour = (visible[index + 1] if index + 1 < len(visible)
+                     else visible[index - 1] if index > 0 else None)
         soft = self._config.soft_delete
         if self._config.confirm_delete:
             msg = (f"Move '{slot.name}' to trash?" if soft
@@ -1038,15 +1087,7 @@ class MainWindow(QMainWindow):
                              slot.game, slot.profile, slot.name, soft)
             self.status_bar.showMessage(f"Delete failed: {e}")
             return
-        self._slots.pop(row)
-        with QSignalBlocker(self.slot_list):
-            self.slot_list.takeItem(row)
-            if self._slots:
-                self.slot_list.setCurrentRow(min(row, len(self._slots) - 1))
-        if self._slots:
-            self._on_slot_selected(self.slot_list.currentRow())
-        else:
-            self._clear_detail()
+        self._reload_slots(neighbour.name if neighbour else "")
         self.status_bar.showMessage(f"{'Moved to trash' if soft else 'Deleted'}: '{slot.name}'.")
 
     def _on_manage_profiles(self) -> None:
@@ -1081,10 +1122,14 @@ class MainWindow(QMainWindow):
         except ValueError as e:
             self._notify(str(e))
             return False
-        # Allow case-only renames on case-insensitive filesystems.
-        if name.lower() != slot.name.lower() and (slot.path.parent / name).exists():
-            self._notify(f"A slot named '{name}' already exists.")
+        # Names are unique across the whole profile, folders included. Ignoring the slot's
+        # own name allows case-only renames on case-insensitive filesystems.
+        game_name = self.game_combo.currentText()
+        profile_name = self.profile_combo.currentText()
+        if storage.name_taken(game_name, profile_name, name, ignore=slot.name):
+            self._notify(f"A slot or folder named '{name}' already exists.")
             return False
+        old_name = slot.name
         try:
             storage.rename_slot(slot, name)
         except Exception as e:
@@ -1092,11 +1137,11 @@ class MainWindow(QMainWindow):
                              slot.game, slot.profile, slot.name, name)
             self._notify(f"Rename failed: {e}")
             return False
-        game_name = self.game_combo.currentText()
-        profile_name = self.profile_combo.currentText()
         # Keep the slot's position in the custom order, even if another sort is active.
-        if self._config.slot_sort == "custom" or storage.load_slot_order(game_name, profile_name):
-            storage.save_slot_order(game_name, profile_name, [s.name for s in self._slots])
+        order = storage.load_slot_order(game_name, profile_name)
+        if old_name in order:
+            storage.save_slot_order(game_name, profile_name,
+                                    [name if n == old_name else n for n in order])
         self._reload_slots(name)
         self._notify(f"Renamed to '{name}'.")
         return True
@@ -1190,6 +1235,17 @@ class MainWindow(QMainWindow):
         self.slot_list.setCurrentRow(row)
 
         menu = QMenu(self)
+        entry = self._rows[row]
+        if isinstance(entry, storage.SaveFolder):
+            # A folder only organises slots: it can be renamed but never loaded.
+            menu.addAction("Rename", lambda: self._on_rename_folder(entry))
+            delete = menu.addAction("Delete folder", lambda: self._on_delete_folder(entry))
+            if entry.slots:
+                delete.setEnabled(False)
+                delete.setToolTip("Move or delete the slots inside first")
+            menu.exec(self.slot_list.mapToGlobal(pos))
+            return
+
         menu.addAction("Rename", self._on_rename_slot)
         menu.addAction("Load save", self._on_load_save)
         if self._current_slot and self._current_slot.video_url.strip():
@@ -1199,9 +1255,144 @@ class MainWindow(QMainWindow):
         menu.addAction("Duplicate", self._on_duplicate_slot)
         menu.addAction("Copy to profile…", lambda: self._on_copy_to_profile(move=False))
         menu.addAction("Move to profile…", lambda: self._on_copy_to_profile(move=True))
+        if entry.folder:
+            menu.addAction("Remove from folder", lambda: self._move_slot(entry, ""))
         menu.addSeparator()
         menu.addAction("Delete", self._on_delete_slot)
         menu.exec(self.slot_list.mapToGlobal(pos))
+
+    # Folders
+
+    def _folder_key(self, name: str) -> tuple[str, str, str]:
+        return (self.game_combo.currentText(), self.profile_combo.currentText(), name)
+
+    def _on_add_folder(self) -> None:
+        game, profile = self.game_combo.currentText(), self.profile_combo.currentText()
+        if not game or not profile:
+            self._notify("No profile selected.")
+            return
+        name, ok = QInputDialog.getText(self, "New folder", "Folder name:")
+        if not ok or not name.strip():
+            return
+        try:
+            folder = storage.create_folder(game, profile, name)
+        except ValueError as e:
+            self._notify(str(e))
+            return
+        except OSError as e:
+            logger.exception("Create folder failed: game=%r profile=%r folder=%r", game, profile, name)
+            self._notify(f"Could not create folder: {e}")
+            return
+        self._reload_slots(select_folder=folder.name)
+        self._notify(f"Created folder '{folder.name}'.")
+
+    def _on_item_clicked(self, item: QListWidgetItem) -> None:
+        """Clicking a folder (which also highlights it) collapses or expands it."""
+        entry = item.data(Qt.UserRole)
+        if not isinstance(entry, storage.SaveFolder):
+            return
+        key = self._folder_key(entry.name)
+        if key in self._collapsed:
+            self._collapsed.discard(key)
+        else:
+            self._collapsed.add(key)
+        # Rebuild after the click has finished, since it replaces the clicked row.
+        QTimer.singleShot(0, lambda: self._populate_list(select_folder=entry.name))
+
+    def _on_rename_folder(self, folder: storage.SaveFolder) -> None:
+        name, ok = QInputDialog.getText(self, "Rename folder", "New name:", text=folder.name)
+        name = name.strip()
+        if not ok or not name or name == folder.name:
+            return
+        game, profile = self.game_combo.currentText(), self.profile_combo.currentText()
+        try:
+            storage.rename_folder(game, profile, folder.name, name)
+        except ValueError as e:
+            self._notify(str(e))
+            return
+        except OSError as e:
+            logger.exception("Rename folder failed: game=%r profile=%r %r -> %r",
+                             game, profile, folder.name, name)
+            self._notify(f"Rename failed: {e}")
+            return
+        if self._folder_key(folder.name) in self._collapsed:
+            self._collapsed.discard(self._folder_key(folder.name))
+            self._collapsed.add(self._folder_key(name))
+        self._reload_slots(self._current_slot_name(), select_folder=name)
+        self._notify(f"Renamed folder to '{name}'.")
+
+    def _on_delete_folder(self, folder: storage.SaveFolder) -> None:
+        game, profile = self.game_combo.currentText(), self.profile_combo.currentText()
+        try:
+            storage.delete_empty_folder(game, profile, folder.name)
+        except (ValueError, OSError) as e:
+            self._notify(str(e))
+            return
+        self._collapsed.discard(self._folder_key(folder.name))
+        self._reload_slots()
+        self._notify(f"Deleted folder '{folder.name}'.")
+
+    def _move_slot(self, slot: storage.SaveSlot, folder: str,
+                   before: str = "", after: bool = False) -> None:
+        """Move a slot into a folder ("" = top level). In Custom sort, `before` is the
+        slot it should sit next to (after it if `after`)."""
+        game, profile = self.game_combo.currentText(), self.profile_combo.currentText()
+        self._flush_notes()
+        self._flush_video()
+        old_path = slot.path
+        changed_folder = folder != slot.folder
+        try:
+            if changed_folder:
+                storage.move_slot_to_folder(slot, folder)
+        except (ValueError, OSError) as e:
+            logger.exception("Move slot failed: game=%r profile=%r slot=%r -> folder %r",
+                             game, profile, slot.name, folder)
+            self._notify(f"Move failed: {e}")
+            return
+        # Practice Mode keeps its own copy of the slot, which has just changed location.
+        if self._guard_slot is not None and self._guard_slot.path == old_path:
+            self._guard_slot.path = slot.path
+            self._guard_slot.folder = slot.folder
+        if folder:
+            self._collapsed.discard(self._folder_key(folder))
+        if self._config.slot_sort == "custom" and before:
+            self._place_in_custom_order(slot.name, folder, before, after)
+        self._reload_slots(slot.name)
+        if changed_folder:
+            self._notify(f"Moved '{slot.name}' into '{folder}'." if folder
+                         else f"Moved '{slot.name}' out of its folder.")
+
+    def _place_in_custom_order(self, name: str, folder: str, ref: str, after: bool) -> None:
+        game, profile = self.game_combo.currentText(), self.profile_combo.currentText()
+        folders, loose = storage.load_profile_tree(game, profile, "custom", False)
+        container = next((f.slots for f in folders if f.name == folder), None) if folder else loose
+        if container is None:
+            return
+        moving = next((s for s in container if s.name == name), None)
+        if moving is None or name == ref:
+            return
+        container.remove(moving)
+        index = next((i for i, s in enumerate(container) if s.name == ref), len(container))
+        container.insert(index + 1 if after else index, moving)
+        storage.save_tree_order(game, profile, folders, loose)
+
+    def _on_entry_dropped(self, source_row: int, target_row: int, where: str) -> None:
+        """A row was dragged onto another: onto a folder files the slot there, onto a
+        slot puts it in that slot's folder (or the top level)."""
+        if not 0 <= source_row < len(self._rows):
+            return
+        slot = self._rows[source_row]
+        if not isinstance(slot, storage.SaveSlot):
+            return
+        target = self._rows[target_row] if 0 <= target_row < len(self._rows) else None
+        if isinstance(target, storage.SaveFolder):
+            folder, before, after = target.name, "", False
+        elif isinstance(target, storage.SaveSlot):
+            folder, before, after = target.folder, target.name, where == "below"
+        else:
+            folder, before, after = "", "", False
+        # Let the drag finish before the list is rebuilt under it.
+        QTimer.singleShot(0, lambda: self._move_slot(slot, folder, before, after))
 
     def _on_duplicate_slot(self) -> None:
         slot = self._selected_slot()
@@ -1239,7 +1430,7 @@ class MainWindow(QMainWindow):
                 return
 
         new_name = slot.name
-        if (storage.SAVES_DIR / game / target_profile / new_name).exists():
+        if storage.name_taken(game, target_profile, new_name):
             new_name = storage.duplicate_slot_name(game, target_profile, slot.name)
 
         try:
@@ -1464,12 +1655,13 @@ class MainWindow(QMainWindow):
     def _refresh_overlay(self) -> None:
         if not self._overlay.isVisible():
             return
-        row = self.slot_list.currentRow()
+        slots = self._visible_slots()
+        current = self._selected_slot()
         self._overlay.update_content(
             game=self.game_combo.currentText(),
             profile=self.profile_combo.currentText(),
-            slot_names=[s.name for s in self._slots],
-            current_row=row,
+            slot_names=[s.name for s in slots],
+            current_row=slots.index(current) if current in slots else -1,
             hotkeys_line=self._overlay_hotkeys_line(),
         )
 
@@ -1714,13 +1906,70 @@ def _fmt_dt(dt: Optional[datetime]) -> str:
 
 
 class _SlotItem(QWidget):
-    def __init__(self, name: str) -> None:
+    def __init__(self, name: str, indented: bool = False) -> None:
         super().__init__()
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 6, 12, 6)
+        # Slots inside a folder are shifted right so they read as its children.
+        layout.setContentsMargins(34 if indented else 12, 6, 12, 6)
         name_lbl = QLabel(name)
         name_lbl.setStyleSheet("font-size: 13px; font-weight: 500; color: #d4cfc8;")
         layout.addWidget(name_lbl)
+
+
+class _FolderItem(QWidget):
+    """List row for a folder: collapse arrow, folder icon and name."""
+
+    def __init__(self, name: str, expanded: bool) -> None:
+        super().__init__()
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(10, 6, 12, 6)
+        layout.setSpacing(6)
+
+        arrow = QLabel("▾" if expanded else "▸")
+        arrow.setFixedWidth(12)
+        arrow.setStyleSheet("font-size: 12px; color: #888899;")
+        layout.addWidget(arrow)
+
+        icon = QLabel()
+        icon.setPixmap(QIcon(str(_UI_DIR / "folder.svg")).pixmap(16, 16))
+        icon.setFixedWidth(18)
+        layout.addWidget(icon)
+
+        name_lbl = QLabel(name)
+        name_lbl.setStyleSheet("font-size: 13px; font-weight: 600; color: #d4cfc8;")
+        layout.addWidget(name_lbl, 1)
+
+
+class _SlotListWidget(QListWidget):
+    """Slot/folder list that reports drops instead of moving rows itself.
+
+    The window moves the slot on disk and rebuilds the list, so the list never
+    shows something that differs from the folders on disk.
+    """
+
+    # source row, target row (-1 when dropped on empty space), "on"/"above"/"below"/"viewport"
+    entry_dropped = Signal(int, int, str)
+
+    def dropEvent(self, event) -> None:
+        selected = self.selectedItems()
+        if not selected:
+            event.ignore()
+            return
+        source_row = self.row(selected[0])
+        item = self.itemAt(event.position().toPoint())
+        target_row = self.row(item) if item is not None else -1
+        indicator = self.dropIndicatorPosition()
+        if indicator == QAbstractItemView.DropIndicatorPosition.OnItem:
+            where = "on"
+        elif indicator == QAbstractItemView.DropIndicatorPosition.AboveItem:
+            where = "above"
+        elif indicator == QAbstractItemView.DropIndicatorPosition.BelowItem:
+            where = "below"
+        else:
+            where = "viewport"
+        # Not handled by Qt, so it can't remove or duplicate the dragged row.
+        event.ignore()
+        self.entry_dropped.emit(source_row, target_row, where)
 
 
 class _InfoRow(QWidget):

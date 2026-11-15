@@ -253,8 +253,8 @@ class _Handler(BaseHTTPRequestHandler):
             if new_name == slot.name:
                 return {"renamed": slot.name}
             # Allow case-only renames on case-insensitive filesystems.
-            if new_name.lower() != slot.name.lower() and (slot.path.parent / new_name).exists():
-                raise _ApiError(409, f"A slot named '{new_name}' already exists.")
+            if storage.name_taken(game_cfg.name, profile, new_name, ignore=slot.name):
+                raise _ApiError(409, f"A slot or folder named '{new_name}' already exists.")
             storage.rename_slot(slot, new_name)
             # Keep the renamed slot's position in a custom order.
             order = storage.load_slot_order(game_cfg.name, profile)

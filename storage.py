@@ -656,6 +656,8 @@ def _copy_to_live(src_dir: Path, game_cfg: GameConfig, file_name: Optional[str])
 
 def import_save(game: str, profile: str, slot_name: str, game_cfg: GameConfig) -> SaveSlot:
     """Copy the game's live save into a new slot."""
+    if name_taken(game, profile, slot_name):
+        raise FileExistsError(f"A slot or folder named {slot_name!r} already exists")
     slot_dir = SAVES_DIR / game / profile / slot_name
     logger.info("Importing save: game=%r profile=%r slot=%r mode=%s",
                 game, profile, slot_name, game_cfg.save_mode)

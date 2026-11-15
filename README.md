@@ -92,10 +92,17 @@ Once copied in, open the app (or switch to a different game and back). Your prof
 
 ### Notes
 
-- You do **not** need to create `meta.json` or `notes.txt`. The app generates them automatically on first load.
+- You do **not** need to create `meta.json` or `notes.txt`, and the app does not add them to your slots. They only appear if you write notes or add a video link to a slot. Created and modified times are read from the save files themselves.
+- For games saved as a whole folder, the slot holds that folder under its real name (`<Slot Name>/<Save Folder>/...`). Slots made by older versions of this app, with the folder stored as `save_data/`, still work.
 - The slot folder name is what you will see in the slot list, so name it something meaningful.
 - Multiple save files in one slot folder are supported (for games with more than one save file).
 - After copying files in, **switch to a different game and back** in the app to refresh the list, or restart the app.
+
+## Folders
+
+Click **+ Folder** above the slot list to create a folder in the current profile. Drag a slot onto a folder to file it there, or drag it onto a top-level slot (or use **Remove from folder** in its right-click menu) to take it out. Click a folder to collapse or expand it, and right-click it to rename it or delete it once it is empty. A folder only groups slots, so it can't be loaded into the game.
+
+On disk a folder is a directory inside the profile that contains a hidden `.fromsave_folder` file, so slots from other save managers are never mistaken for folders. Slot and folder names are unique within a profile.
 
 ## Practice Mode
 
