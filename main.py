@@ -8,6 +8,11 @@ import app_logging
 import app_paths
 import config
 from ui.main_window import MainWindow
+from ui.main_window_startup_fix import install as install_main_window_builders
+
+# The experimental UI branch omitted two builder methods expected by MainWindow.
+# Install the repair before constructing the window so startup can proceed.
+install_main_window_builders()
 
 _CA_BUNDLE_PATHS = (
     "/etc/ssl/certs/ca-certificates.crt",  # Debian/Ubuntu/Arch/SteamOS
