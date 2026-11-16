@@ -158,6 +158,13 @@ class MainWindow(QMainWindow):
     def _build_ui(self) -> None:
         root = QWidget()
         self.setCentralWidget(root)
+        # Brief colour-coded banner for a finished load or replace.
+        self._flash_label = QLabel(root)
+        self._flash_label.setAlignment(Qt.AlignCenter)
+        self._flash_label.hide()
+        self._flash_timer = QTimer(self)
+        self._flash_timer.setSingleShot(True)
+        self._flash_timer.timeout.connect(self._flash_label.hide)
         outer = QVBoxLayout(root)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
@@ -790,6 +797,22 @@ class MainWindow(QMainWindow):
         self._flush_video()
         QTimer.singleShot(0, self._sync_minimum_size)
 
+    def _flash(self, text: str, color: str) -> None:
+        """Show a coloured banner over the window for a moment (only while it is visible)."""
+        if not self.isVisible() or self.isMinimized():
+            return
+        label = self._flash_label
+        label.setText(text)
+        label.setStyleSheet(
+            f"background-color: {color}; color: #ffffff; font-size: 20px; font-weight: 700;"
+            "border-radius: 10px; padding: 14px 32px;")
+        label.adjustSize()
+        parent = label.parentWidget()
+        label.move((parent.width() - label.width()) // 2, max(12, parent.height() // 8))
+        label.raise_()
+        label.show()
+        self._flash_timer.start(1500)
+
     def _notify(self, text: str, timeout: int = 0) -> None:
         """Show a status message, mirrored in the overlay while it's visible."""
         self.status_bar.showMessage(text, timeout)
@@ -1108,7 +1131,8 @@ class MainWindow(QMainWindow):
         dlg.setWindowTitle(title)
         dlg.setText(message)
         dlg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
-        dlg.setDefaultButton(QMessageBox.No)
+        # Delete and replace default to Yes (Enter confirms); other prompts stay on No.
+        dlg.setDefaultButton(QMessageBox.Yes if action in ("delete", "replace") else QMessageBox.No)
 
         checkbox: Optional[QCheckBox] = None
         if disable_key:
@@ -1153,6 +1177,7 @@ class MainWindow(QMainWindow):
             return
         self._reload_slots(slot.name)
         self._notify(f"Replaced '{slot.name}'.")
+        self._flash("Replace Successful", "#d9822b")
 
     def _on_load_save(self) -> None:
         if self._run_mode:
@@ -1178,6 +1203,7 @@ class MainWindow(QMainWindow):
             self._guard_slot = slot
 
         self._notify(f"Loaded '{slot.name}' to game save.")
+        self._flash("Load Successful", "#2e9e5b")
 
     def _on_delete_slot(self) -> None:
         slot = self._selected_slot()
