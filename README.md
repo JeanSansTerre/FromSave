@@ -97,6 +97,7 @@ Once copied in, open the app (or switch to a different game and back). Your prof
 
 - You do **not** need to create `meta.json` or `notes.txt`, and the app does not add them to your slots. They only appear if you write notes or add a video link to a slot. Created and modified times are read from the save files themselves.
 - For games saved as a whole folder, the slot mirrors what is inside the folder you set as the save path. For example, with the path set to `.../savedata`, a slot holds `<Slot Name>/BLUS30443DEMONSS005/...`. Loading puts those folders back inside `savedata`, leaving anything else there alone. Slots made by earlier versions of this app (`save_data/` or the folder's own name as a wrapper) still load.
+- For games with a single save file you can also put the save file itself straight into the profile, named as you want it to appear (`saves/<Game>/<Profile>/01. Asylum`). It is treated as a slot, and Import creates slots this way. Such slots have no notes or video link.
 - The slot folder name is what you will see in the slot list, so name it something meaningful.
 - Multiple save files in one slot folder are supported (for games with more than one save file).
 - After copying files in, **switch to a different game and back** in the app to refresh the list, or restart the app.
@@ -111,7 +112,7 @@ On disk a folder is a directory inside the profile that contains a hidden `.from
 
 With the slot list focused: **F2** renames the selected slot or folder, **Delete** deletes the selected slot(s) or folder (a folder with slots in it asks first). **Ctrl+Z**, only while the FromSave window is active, undoes the last import, rename, move, new folder or delete (up to 20 steps). Load, Replace and Practice Mode are not covered; the game's save is protected by the automatic backups instead.
 
-Importing follows the layout other save managers use: for a game saved as a folder, the slot contains what is inside the save folder (for Demon's Souls, the `BLUS...` save directory); for a single save file, the slot contains a copy of that file. The type is detected from what is actually at the save path, so a wrongly chosen save type no longer makes import fail.
+Importing follows the layout other save managers use: for a game saved as a folder, the slot contains what is inside the save folder (for Demon's Souls, the `BLUS...` save directory); for a single save file, the slot is a copy of that file placed directly in the profile, named after the slot. The type is detected from what is actually at the save path, so a wrongly chosen save type no longer makes import fail.
 
 ## Practice Mode
 

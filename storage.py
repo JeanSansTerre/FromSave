@@ -82,6 +82,7 @@ class SaveSlot:
     video_url: str = ""
     data_dir_name: Optional[str] = None  # folder-mode slots: name of the saved folder
     folder: str = ""  # name of the organising folder holding this slot, "" if none
+    bare: bool = False  # the slot is one save file sitting directly in the profile/folder
 
 
 @dataclass
@@ -254,6 +255,8 @@ def _payload_files(slot_dir: Path) -> list[Path]:
 
 def slot_save_files(slot: SaveSlot) -> list[Path]:
     """All save files stored in a slot, regardless of save mode."""
+    if slot.bare:
+        return [slot.path] if slot.path.is_file() else []
     data_dir = _slot_data_dir(slot.path)
     if data_dir is not None:
         return _payload_files(slot.path)
@@ -267,7 +270,9 @@ def _is_folder_dir(path: Path) -> bool:
 def _read_folder_slots(folder_dir: Path, game: str, profile: str) -> list[SaveSlot]:
     slots = []
     for slot_dir in sorted(folder_dir.iterdir()):
-        if slot_dir.is_dir() and (slot := _read_slot(slot_dir, game, profile)):
+        if slot_dir.name.startswith("."):
+            continue
+        if slot := _read_entry(slot_dir, game, profile):
             slot.folder = folder_dir.name if _is_folder_dir(folder_dir) else ""
             slots.append(slot)
     return slots
@@ -280,11 +285,9 @@ def load_slots(game: str, profile: str) -> list[SaveSlot]:
         return []
     slots = []
     for entry in sorted(profile_dir.iterdir()):
-        if not entry.is_dir():
-            continue
-        if _is_folder_dir(entry):
+        if entry.is_dir() and _is_folder_dir(entry):
             slots.extend(_read_folder_slots(entry, game, profile))
-        elif slot := _read_slot(entry, game, profile):
+        elif slot := _read_entry(entry, game, profile):
             slots.append(slot)
     logger.debug("Loaded %d slot(s) for game=%r profile=%r", len(slots), game, profile)
     return slots
@@ -324,11 +327,9 @@ def load_profile_tree(game: str, profile: str, sort: str,
     if not game or not profile or not profile_dir.exists():
         return folders, loose
     for entry in sorted(profile_dir.iterdir()):
-        if not entry.is_dir():
-            continue
-        if _is_folder_dir(entry):
+        if entry.is_dir() and _is_folder_dir(entry):
             folders.append(SaveFolder(entry.name, entry, _read_folder_slots(entry, game, profile)))
-        elif slot := _read_slot(entry, game, profile):
+        elif slot := _read_entry(entry, game, profile):
             loose.append(slot)
 
     order = {name: i for i, name in enumerate(load_slot_order(game, profile))}
@@ -366,11 +367,12 @@ def _profile_names(game: str, profile: str) -> set[str]:
     if not profile_dir.exists():
         return names
     for entry in profile_dir.iterdir():
-        if not entry.is_dir():
+        if not entry.is_dir() and not _is_bare_save(entry):
             continue
         names.add(entry.name.lower())
-        if _is_folder_dir(entry):
-            names.update(d.name.lower() for d in entry.iterdir() if d.is_dir())
+        if entry.is_dir() and _is_folder_dir(entry):
+            names.update(d.name.lower() for d in entry.iterdir()
+                         if d.is_dir() or _is_bare_save(d))
     return names
 
 
@@ -411,7 +413,7 @@ def delete_empty_folder(game: str, profile: str, name: str) -> None:
     path = SAVES_DIR / game / profile / name
     if not _is_folder_dir(path):
         raise ValueError(f"'{name}' is not a folder")
-    if any(d.is_dir() for d in path.iterdir()):
+    if any(d.is_dir() or _is_bare_save(d) for d in path.iterdir()):
         raise ValueError("Only empty folders can be deleted")
     logger.info("Deleting empty folder: game=%r profile=%r folder=%r", game, profile, name)
     shutil.rmtree(path)
@@ -430,7 +432,10 @@ def stash_for_undo(path: Path) -> Path:
     """Copy a slot or folder into saves/_undo so a delete can be taken back."""
     stash = SAVES_DIR / _UNDO_DIR / datetime.now().strftime("%Y%m%d_%H%M%S_%f") / path.name
     stash.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(path, stash)
+    if path.is_dir():
+        shutil.copytree(path, stash)
+    else:
+        shutil.copy2(path, stash)
     return stash
 
 
@@ -495,6 +500,31 @@ def _guess_timestamps(slot_dir: Path, data_dir: Optional[Path]) -> tuple[datetim
     return datetime.fromtimestamp(created), datetime.fromtimestamp(modified)
 
 
+_NOT_SAVES = {"order.json", "desktop.ini", "thumbs.db", ".ds_store"}
+
+
+def _is_bare_save(path: Path) -> bool:
+    """A single save file placed directly in a profile, named after its slot."""
+    return _is_save_file(path) and path.name.lower() not in _NOT_SAVES
+
+
+def _read_bare_slot(path: Path, game: str, profile: str) -> SaveSlot:
+    st = path.stat()
+    modified = datetime.fromtimestamp(st.st_mtime)
+    created = datetime.fromtimestamp(min(st.st_ctime, st.st_mtime))
+    return SaveSlot(name=path.name, game=game, profile=profile, path=path,
+                    date_created=created, date_modified=modified, notes="",
+                    save_file=path.name, bare=True)
+
+
+def _read_entry(entry: Path, game: str, profile: str) -> Optional[SaveSlot]:
+    if entry.is_dir():
+        return _read_slot(entry, game, profile)
+    if _is_bare_save(entry):
+        return _read_bare_slot(entry, game, profile)
+    return None
+
+
 def _read_slot(slot_dir: Path, game: str, profile: str) -> Optional[SaveSlot]:
     meta_file = slot_dir / "meta.json"
     notes_file = slot_dir / "notes.txt"
@@ -547,7 +577,7 @@ def _update_meta(meta_file: Path, updates: dict) -> None:
 def save_notes(slot: SaveSlot, text: str) -> None:
     # Only touch the slot when the notes actually changed, so browsing slots
     # never adds a notes.txt to them.
-    if text.strip() == slot.notes.strip():
+    if text.strip() == slot.notes.strip() or slot.bare:  # a bare file has nowhere to keep notes
         return
     (slot.path / "notes.txt").write_text(text, encoding="utf-8")
     slot.notes = text
@@ -555,7 +585,7 @@ def save_notes(slot: SaveSlot, text: str) -> None:
 
 def save_video_url(slot: SaveSlot, url: str) -> None:
     url = url.strip()
-    if url == slot.video_url:
+    if url == slot.video_url or slot.bare:
         return
     _update_meta(slot.path / "meta.json", {"video_url": url})
     slot.video_url = url
@@ -571,6 +601,14 @@ def rename_slot(slot: SaveSlot, new_name: str) -> None:
     slot.path = new_path
 
 
+def remove_path(path: Path) -> None:
+    """Delete a slot file or directory."""
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path)
+    else:
+        path.unlink()
+
+
 def delete_slot(slot: SaveSlot, soft: bool = False) -> None:
     """Delete a slot; soft sends it to the system trash instead."""
     logger.info("Deleting slot: game=%r profile=%r slot=%r soft=%s",
@@ -578,7 +616,7 @@ def delete_slot(slot: SaveSlot, soft: bool = False) -> None:
     if soft:
         send2trash.send2trash(str(slot.path))
     else:
-        shutil.rmtree(slot.path)
+        remove_path(slot.path)
 
 
 def _unique_name(game: str, profile: str, base: str) -> str:
@@ -609,6 +647,12 @@ def copy_slot_to_profile(slot: SaveSlot, target_profile: str, new_name: str,
     if folder:
         target_dir = target_dir / folder
     new_dir = target_dir / new_name
+    if slot.bare:
+        target_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(slot.path, new_dir)
+        copy = _read_bare_slot(new_dir, slot.game, target_profile)
+        copy.folder = folder
+        return copy
     shutil.copytree(slot.path, new_dir)
     meta_file = new_dir / "meta.json"
     if meta_file.exists():  # only slots that already track timestamps keep doing so
@@ -787,6 +831,14 @@ def import_save(game: str, profile: str, slot_name: str, game_cfg: GameConfig) -
     slot_dir = SAVES_DIR / game / profile / slot_name
     logger.info("Importing save: game=%r profile=%r slot=%r mode=%s",
                 game, profile, slot_name, game_cfg.save_mode)
+    if _effective_mode(game_cfg) == "file":
+        # A single save file becomes the slot itself: Profile/<slot name>, like other managers.
+        live = Path(game_cfg.save_path)
+        if not live.is_file():
+            raise FileNotFoundError(f"Save file not found: {live}")
+        slot_dir.parent.mkdir(parents=True, exist_ok=True)
+        _copy_file(live, slot_dir)
+        return _read_bare_slot(slot_dir, game, profile)
     slot_dir.mkdir(parents=True, exist_ok=False)
     try:
         _copy_live_save(game_cfg, slot_dir)
@@ -801,6 +853,10 @@ def replace_save(slot: SaveSlot, game_cfg: GameConfig) -> None:
     """Overwrite a slot's contents with the game's live save."""
     logger.info("Replacing slot from live save: game=%r profile=%r slot=%r mode=%s",
                 slot.game, slot.profile, slot.name, game_cfg.save_mode)
+    if slot.bare:
+        _copy_file(Path(game_cfg.save_path), slot.path)
+        slot.date_modified = datetime.now()
+        return
     _copy_live_save(game_cfg, slot.path, file_name=slot.save_file, folder_name=slot.data_dir_name)
     now = datetime.now()
     meta_file = slot.path / "meta.json"
@@ -822,6 +878,11 @@ def load_save(slot: SaveSlot, game_cfg: GameConfig, *, make_backup: bool = True)
             _rotating_backup(game_cfg, _BACKUPS_DIR)
         except OSError:
             logger.exception("Failed to back up live save before load; continuing")
+    if slot.bare:
+        if _effective_mode(game_cfg) != "file":
+            raise ValueError("This slot is a single save file, but the game's save path is not a file")
+        _copy_file(slot.path, Path(game_cfg.save_path))
+        return
     _copy_to_live(slot.path, game_cfg, slot.save_file)
 
 

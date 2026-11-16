@@ -1107,7 +1107,7 @@ class MainWindow(QMainWindow):
             return False
         slot_path = storage.SAVES_DIR / cfg.name / profile / name
         self._push_undo(f"import '{name}'",
-                        lambda: shutil.rmtree(slot_path))
+                        lambda: storage.remove_path(slot_path))
         self._reload_slots(name)
         self._notify(f"Imported '{name}'.")
         return True
