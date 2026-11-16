@@ -236,11 +236,27 @@ def _slot_data_dir(slot_dir: Path) -> Optional[Path]:
     return next((c for c in children if c.is_dir() and not c.name.startswith(".")), None)
 
 
+def _payload_entries(slot_dir: Path) -> list[Path]:
+    """Everything in a slot that belongs to the game save (not meta.json, notes, hidden files)."""
+    try:
+        return [c for c in sorted(slot_dir.iterdir(), key=lambda p: p.name.lower())
+                if c.name not in _RESERVED and not c.name.startswith(".")]
+    except OSError:
+        return []
+
+
+def _payload_files(slot_dir: Path) -> list[Path]:
+    files: list[Path] = []
+    for entry in _payload_entries(slot_dir):
+        files.extend([entry] if entry.is_file() else [f for f in entry.rglob("*") if f.is_file()])
+    return files
+
+
 def slot_save_files(slot: SaveSlot) -> list[Path]:
     """All save files stored in a slot, regardless of save mode."""
     data_dir = _slot_data_dir(slot.path)
     if data_dir is not None:
-        return [f for f in data_dir.rglob("*") if f.is_file()]
+        return _payload_files(slot.path)
     return [f for f in slot.path.iterdir() if _is_save_file(f)]
 
 
@@ -467,7 +483,7 @@ def move_slot_to_folder(slot: SaveSlot, folder: str) -> SaveSlot:
 def _guess_timestamps(slot_dir: Path, data_dir: Optional[Path]) -> tuple[datetime, datetime]:
     """Created/modified times taken from the saved files, for slots without a meta.json."""
     if data_dir is not None:
-        files = [f for f in data_dir.rglob("*") if f.is_file()]
+        files = _payload_files(slot_dir)
     else:
         files = [f for f in slot_dir.iterdir() if _is_save_file(f)]
     if not files:
@@ -645,6 +661,12 @@ def _copy_file(src: Path, dst: Path) -> None:
     shutil.copy2(src, dst)
 
 
+def _replace_tree_or_file(src: Path, dst: Path) -> None:
+    if dst.is_dir() and not dst.is_symlink():
+        shutil.rmtree(dst)
+    _copy_file(src, dst)
+
+
 def _effective_mode(game_cfg: GameConfig) -> str:
     """The save type to use, trusting what is actually on disk over the configured type.
 
@@ -696,7 +718,15 @@ def _copy_live_save(game_cfg: GameConfig, dest: Path, file_name: Optional[str] =
             else:
                 logger.warning("Configured save file missing: %s", src)
     elif mode == "folder":
-        _replace_tree(Path(game_cfg.save_path), dest / (folder_name or _live_folder_name(game_cfg)))
+        # The slot mirrors what is inside the configured folder, so pointing the game at
+        # ".../savedata" gives Save n/<SaveDirectory>/..., like other save managers.
+        for old in _payload_entries(dest):
+            shutil.rmtree(old) if old.is_dir() else old.unlink()
+        for child in sorted(Path(game_cfg.save_path).iterdir()):
+            if child.is_dir():
+                _replace_tree(child, dest / child.name)
+            else:
+                _copy_file(child, dest / child.name)
 
 
 def _copy_to_live(src_dir: Path, game_cfg: GameConfig, file_name: Optional[str]) -> None:
@@ -720,10 +750,21 @@ def _copy_to_live(src_dir: Path, game_cfg: GameConfig, file_name: Optional[str])
             else:
                 logger.warning("Save file missing from %s: %s", src_dir, dst.name)
     elif mode == "folder":
-        data_dir = _slot_data_dir(src_dir)
-        if data_dir is None:
-            raise FileNotFoundError(f"No save folder in {src_dir}")
-        _replace_tree(data_dir, Path(game_cfg.save_path))
+        live = Path(game_cfg.save_path)
+        legacy = src_dir / _LEGACY_DATA_DIR
+        entries = _payload_entries(src_dir)
+        if legacy.is_dir():  # older FromSave slots wrapped the folder in save_data/
+            entries = _payload_entries(legacy)
+        elif len(entries) == 1 and entries[0].is_dir() and entries[0].name == live.name:
+            entries = _payload_entries(entries[0])  # slots that store the folder itself
+        if not entries:
+            raise FileNotFoundError(f"No save data in {src_dir}")
+        live.mkdir(parents=True, exist_ok=True)
+        for entry in entries:  # replace each saved item, leaving anything else alone
+            if entry.is_dir():
+                _replace_tree(entry, live / entry.name)
+            else:
+                _replace_tree_or_file(entry, live / entry.name)
 
 
 def import_save(game: str, profile: str, slot_name: str, game_cfg: GameConfig) -> SaveSlot:
