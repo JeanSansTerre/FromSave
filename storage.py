@@ -720,13 +720,20 @@ def _copy_live_save(game_cfg: GameConfig, dest: Path, file_name: Optional[str] =
     elif mode == "folder":
         # The slot mirrors what is inside the configured folder, so pointing the game at
         # ".../savedata" gives Save n/<SaveDirectory>/..., like other save managers.
-        for old in _payload_entries(dest):
+        live = Path(game_cfg.save_path)
+        target = dest
+        existing = _payload_entries(dest)
+        if (dest / _LEGACY_DATA_DIR).is_dir():  # keep the layout an existing slot already uses
+            target = dest / _LEGACY_DATA_DIR
+        elif len(existing) == 1 and existing[0].is_dir() and existing[0].name == live.name:
+            target = existing[0]
+        for old in _payload_entries(target):
             shutil.rmtree(old) if old.is_dir() else old.unlink()
-        for child in sorted(Path(game_cfg.save_path).iterdir()):
+        for child in sorted(live.iterdir()):
             if child.is_dir():
-                _replace_tree(child, dest / child.name)
+                _replace_tree(child, target / child.name)
             else:
-                _copy_file(child, dest / child.name)
+                _copy_file(child, target / child.name)
 
 
 def _copy_to_live(src_dir: Path, game_cfg: GameConfig, file_name: Optional[str]) -> None:
@@ -753,13 +760,19 @@ def _copy_to_live(src_dir: Path, game_cfg: GameConfig, file_name: Optional[str])
         live = Path(game_cfg.save_path)
         legacy = src_dir / _LEGACY_DATA_DIR
         entries = _payload_entries(src_dir)
+        wipe = False  # whether the whole live folder is replaced, not just the saved items
         if legacy.is_dir():  # older FromSave slots wrapped the folder in save_data/
-            entries = _payload_entries(legacy)
+            entries, wipe = _payload_entries(legacy), True
         elif len(entries) == 1 and entries[0].is_dir() and entries[0].name == live.name:
-            entries = _payload_entries(entries[0])  # slots that store the folder itself
+            entries, wipe = _payload_entries(entries[0]), True  # the folder stored under its own name
+        elif any(e.is_file() for e in entries):
+            wipe = True  # the saved folder is the save path itself, so loose files are all of it
         if not entries:
             raise FileNotFoundError(f"No save data in {src_dir}")
         live.mkdir(parents=True, exist_ok=True)
+        if wipe:
+            for old in live.iterdir():
+                shutil.rmtree(old) if old.is_dir() and not old.is_symlink() else old.unlink()
         for entry in entries:  # replace each saved item, leaving anything else alone
             if entry.is_dir():
                 _replace_tree(entry, live / entry.name)
