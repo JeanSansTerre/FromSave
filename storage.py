@@ -26,6 +26,7 @@ _GAME_CONFIG = "game.json"
 _BACKUPS_DIR = "_backups"
 _RUN_BACKUPS_DIR = "_run_backups"
 _PRACTICE_START_DIR = "_practice_start"
+_UNDO_DIR = "_undo"
 _MAX_BACKUPS = 3
 
 SORT_MODES = ("name", "created", "modified", "custom")
@@ -400,6 +401,50 @@ def delete_empty_folder(game: str, profile: str, name: str) -> None:
     shutil.rmtree(path)
 
 
+def delete_folder(game: str, profile: str, name: str) -> None:
+    """Remove a folder together with every slot inside it."""
+    path = SAVES_DIR / game / profile / name
+    if not _is_folder_dir(path):
+        raise ValueError(f"'{name}' is not a folder")
+    logger.info("Deleting folder with contents: game=%r profile=%r folder=%r", game, profile, name)
+    shutil.rmtree(path)
+
+
+def stash_for_undo(path: Path) -> Path:
+    """Copy a slot or folder into saves/_undo so a delete can be taken back."""
+    stash = SAVES_DIR / _UNDO_DIR / datetime.now().strftime("%Y%m%d_%H%M%S_%f") / path.name
+    stash.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(path, stash)
+    return stash
+
+
+def restore_stash(stash: Path, dest: Path) -> None:
+    """Put a stashed slot or folder back where it was."""
+    if dest.exists():
+        raise FileExistsError(f"'{dest.name}' already exists")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(stash), str(dest))
+    shutil.rmtree(stash.parent, ignore_errors=True)
+
+
+def discard_stash(stash: Path) -> None:
+    shutil.rmtree(stash.parent, ignore_errors=True)
+
+
+def clear_undo_stash() -> None:
+    shutil.rmtree(SAVES_DIR / _UNDO_DIR, ignore_errors=True)
+
+
+def move_slot_by_name(game: str, profile: str, name: str, from_folder: str, to_folder: str) -> None:
+    """Move a slot between folders by name ("" = top level); used to undo a move."""
+    base = SAVES_DIR / game / profile
+    src = (base / from_folder if from_folder else base) / name
+    dst_dir = base / to_folder if to_folder else base
+    if (dst_dir / name).exists():
+        raise FileExistsError(f"'{name}' already exists there")
+    src.rename(dst_dir / name)
+
+
 def move_slot_to_folder(slot: SaveSlot, folder: str) -> SaveSlot:
     """Move a slot into a folder of its profile, or out to the top level if folder is ""."""
     profile_dir = SAVES_DIR / slot.game / slot.profile
@@ -600,9 +645,26 @@ def _copy_file(src: Path, dst: Path) -> None:
     shutil.copy2(src, dst)
 
 
+def _effective_mode(game_cfg: GameConfig) -> str:
+    """The save type to use, trusting what is actually on disk over the configured type.
+
+    A game set to "file" whose path is a directory (or "folder" whose path is a file)
+    would otherwise fail; the live path itself tells us which kind of save it is.
+    """
+    if game_cfg.save_mode in ("file", "folder") and game_cfg.save_path:
+        live = Path(game_cfg.save_path)
+        if live.is_dir():
+            return "folder"
+        if live.is_file():
+            return "file"
+    return game_cfg.save_mode
+
+
 def _replace_tree(src: Path, dst: Path) -> None:
-    if dst.exists():
+    if dst.is_dir() and not dst.is_symlink():
         shutil.rmtree(dst)
+    elif dst.exists() or dst.is_symlink():
+        dst.unlink()
     logger.debug("Copying folder %s -> %s", src, dst)
     shutil.copytree(src, dst)
 
@@ -623,33 +685,41 @@ def _copy_live_save(game_cfg: GameConfig, dest: Path, file_name: Optional[str] =
     for the saved folder in "folder" mode.
     """
     dest.mkdir(parents=True, exist_ok=True)
-    if game_cfg.save_mode == "file":
+    mode = _effective_mode(game_cfg)
+    if mode == "file":
         src = Path(game_cfg.save_path)
         _copy_file(src, dest / (file_name or src.name))
-    elif game_cfg.save_mode == "files":
+    elif mode == "files":
         for src in map(Path, game_cfg.save_paths):
             if src.is_file():
                 _copy_file(src, dest / src.name)
             else:
                 logger.warning("Configured save file missing: %s", src)
-    elif game_cfg.save_mode == "folder":
+    elif mode == "folder":
         _replace_tree(Path(game_cfg.save_path), dest / (folder_name or _live_folder_name(game_cfg)))
 
 
 def _copy_to_live(src_dir: Path, game_cfg: GameConfig, file_name: Optional[str]) -> None:
     """Copy a slot or snapshot folder over the live save. file_name is used in "file" mode."""
-    if game_cfg.save_mode == "file":
+    mode = _effective_mode(game_cfg)
+    if mode in ("file", "folder") and not Path(game_cfg.save_path).exists():
+        # Live path missing: go by what the slot actually holds.
+        if _slot_data_dir(src_dir) is not None:
+            mode = "folder"
+        elif file_name and (src_dir / file_name).is_file():
+            mode = "file"
+    if mode == "file":
         if not file_name or not (src_dir / file_name).is_file():
             raise FileNotFoundError(f"No save file in {src_dir}")
         _copy_file(src_dir / file_name, Path(game_cfg.save_path))
-    elif game_cfg.save_mode == "files":
+    elif mode == "files":
         for dst in map(Path, game_cfg.save_paths):
             src = src_dir / dst.name
             if src.exists():
                 _copy_file(src, dst)
             else:
                 logger.warning("Save file missing from %s: %s", src_dir, dst.name)
-    elif game_cfg.save_mode == "folder":
+    elif mode == "folder":
         data_dir = _slot_data_dir(src_dir)
         if data_dir is None:
             raise FileNotFoundError(f"No save folder in {src_dir}")
@@ -664,7 +734,11 @@ def import_save(game: str, profile: str, slot_name: str, game_cfg: GameConfig) -
     logger.info("Importing save: game=%r profile=%r slot=%r mode=%s",
                 game, profile, slot_name, game_cfg.save_mode)
     slot_dir.mkdir(parents=True, exist_ok=False)
-    _copy_live_save(game_cfg, slot_dir)
+    try:
+        _copy_live_save(game_cfg, slot_dir)
+    except Exception:
+        shutil.rmtree(slot_dir, ignore_errors=True)  # don't leave an empty slot behind
+        raise
     # The slot holds only the game's own save, like slots made by other save managers.
     return _read_slot(slot_dir, game, profile)
 

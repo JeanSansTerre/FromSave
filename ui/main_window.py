@@ -1,7 +1,8 @@
 import logging
+import shutil
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Union
+from typing import Callable, Optional, Union
 
 from PySide6.QtCore import QEvent, QFileSystemWatcher, QSignalBlocker, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QIcon, QKeySequence, QShortcut
@@ -106,6 +107,9 @@ class MainWindow(QMainWindow):
         self._global_hotkeys.triggered.connect(self._on_main_hotkey)
         self._global_hotkeys_started = False
         self._shortcuts: list[QShortcut] = []
+        # Ctrl+Z history: (label, undo function). Only active while this window has focus.
+        self._undo_stack: list[tuple[str, Callable[[], None]]] = []
+        storage.clear_undo_stash()
         self._overlay_toggle_hotkey = GlobalHotkeyListener(self)
         self._overlay_toggle_hotkey.triggered.connect(self._toggle_overlay)
         self._overlay_toggle_shortcut: Optional[QShortcut] = None
@@ -311,6 +315,14 @@ class MainWindow(QMainWindow):
         self.slot_list.setContextMenuPolicy(Qt.CustomContextMenu)
         self.slot_list.customContextMenuRequested.connect(self._on_slot_context_menu)
         self.slot_list.installEventFilter(self)
+        # F2 renames and Delete deletes the selected slot(s) or folder while the list has focus.
+        for key, handler in (("F2", self._rename_selected), ("Delete", self._delete_selected)):
+            sc = QShortcut(QKeySequence(key), self.slot_list)
+            sc.setContext(Qt.WidgetShortcut)
+            sc.activated.connect(handler)
+        undo_sc = QShortcut(QKeySequence("Ctrl+Z"), self)
+        undo_sc.setContext(Qt.WindowShortcut)
+        undo_sc.activated.connect(self._undo_last)
         layout.addWidget(self.slot_list, 1)
 
         return panel
@@ -965,6 +977,79 @@ class MainWindow(QMainWindow):
             self._notify(f"Lock: restore failed — {e}")
         self._guard_watcher.addPath(path)
 
+    # ── Undo ──
+    def _push_undo(self, label: str, fn: Callable[[], None]) -> None:
+        self._undo_stack.append((label, fn))
+        del self._undo_stack[:-20]
+
+    def _undo_last(self) -> None:
+        if not self._undo_stack:
+            self._notify("Nothing to undo.")
+            return
+        label, fn = self._undo_stack.pop()
+        self._flush_notes()
+        self._flush_video()
+        self._current_slot = None
+        try:
+            fn()
+        except Exception as e:
+            logger.exception("Undo failed: %s", label)
+            self._notify(f"Could not undo '{label}': {e}")
+            return
+        self._reload_slots()
+        self._notify(f"Undid: {label}.")
+
+    def _rename_selected(self) -> None:
+        entry = self._selected_entry()
+        if isinstance(entry, storage.SaveFolder):
+            self._on_rename_folder(entry)
+        elif isinstance(entry, storage.SaveSlot):
+            self._on_rename_slot()
+
+    def _delete_selected(self) -> None:
+        """Delete key: the selected slots, or the selected folder."""
+        entry = self._selected_entry()
+        if isinstance(entry, storage.SaveFolder) and not self._multi_selected():
+            self._on_delete_folder(entry)
+            return
+        slots = self._selected_slots()
+        if len(slots) > 1:
+            self._delete_many(slots)
+        elif slots:
+            self._on_delete_slot()
+
+    def _delete_many(self, slots: list[storage.SaveSlot]) -> None:
+        soft = self._config.soft_delete
+        if self._config.confirm_delete:
+            msg = (f"Move {len(slots)} slots to trash?" if soft
+                   else f"Permanently delete {len(slots)} slots?")
+            if not self._confirm("delete", "Delete slots", msg, disable_key="confirm_delete"):
+                return
+        self._flush_notes()
+        self._flush_video()
+        self._current_slot = None
+        done: list[tuple[Path, Path]] = []
+        failed = ""
+        for slot in slots:
+            try:
+                stash = storage.stash_for_undo(slot.path)
+                try:
+                    storage.delete_slot(slot, soft=soft)
+                except Exception:
+                    storage.discard_stash(stash)
+                    raise
+                done.append((stash, slot.path))
+            except Exception as e:
+                logger.exception("Delete slot failed: %r", slot.name)
+                failed = f"'{slot.name}': {e}"
+        if done:
+            def undo(items=tuple(done)) -> None:
+                for stash, dest in items:
+                    storage.restore_stash(stash, dest)
+            self._push_undo(f"delete {len(done)} slots", undo)
+        self._reload_slots()
+        self._notify(f"Delete failed: {failed}" if failed else f"Deleted {len(done)} slots.")
+
     def _on_import_save(self) -> None:
         cfg = self._get_game_cfg()
         if not cfg or not self._validate_game_save_path(cfg):
@@ -997,6 +1082,9 @@ class MainWindow(QMainWindow):
             logger.exception("Import save failed: game=%r profile=%r slot=%r", cfg.name, profile, name)
             self._notify(f"Import failed: {e}")
             return False
+        slot_path = storage.SAVES_DIR / cfg.name / profile / name
+        self._push_undo(f"import '{name}'",
+                        lambda: shutil.rmtree(slot_path))
         self._reload_slots(name)
         self._notify(f"Imported '{name}'.")
         return True
@@ -1110,12 +1198,20 @@ class MainWindow(QMainWindow):
         self._flush_video()
         self._current_slot = None
         try:
-            storage.delete_slot(slot, soft=soft)
+            stash = storage.stash_for_undo(slot.path)
+            try:
+                storage.delete_slot(slot, soft=soft)
+            except Exception:
+                storage.discard_stash(stash)
+                raise
         except Exception as e:
             logger.exception("Delete slot failed: game=%r profile=%r slot=%r soft=%s",
                              slot.game, slot.profile, slot.name, soft)
             self.status_bar.showMessage(f"Delete failed: {e}")
             return
+        slot_path = slot.path
+        self._push_undo(f"delete '{slot.name}'",
+                        lambda: storage.restore_stash(stash, slot_path))
         self._reload_slots(neighbour.name if neighbour else "")
         self.status_bar.showMessage(f"{'Moved to trash' if soft else 'Deleted'}: '{slot.name}'.")
 
@@ -1203,6 +1299,9 @@ class MainWindow(QMainWindow):
         if old_name in order:
             storage.save_slot_order(game_name, profile_name,
                                     [name if n == old_name else n for n in order])
+        new_path = slot.path
+        self._push_undo(f"rename '{old_name}'",
+                        lambda: new_path.rename(new_path.parent / old_name))
         self._reload_slots(name)
         self._notify(f"Renamed to '{name}'.")
         return True
@@ -1351,6 +1450,8 @@ class MainWindow(QMainWindow):
             logger.exception("Create folder failed: game=%r profile=%r folder=%r", game, profile, name)
             self._notify(f"Could not create folder: {e}")
             return
+        self._push_undo(f"new folder '{folder.name}'",
+                        lambda: shutil.rmtree(folder.path))
         self._reload_slots(select_folder=folder.name)
         self._notify(f"Created folder '{folder.name}'.")
 
@@ -1386,16 +1487,36 @@ class MainWindow(QMainWindow):
         if self._folder_key(folder.name) in self._collapsed:
             self._collapsed.discard(self._folder_key(folder.name))
             self._collapsed.add(self._folder_key(name))
+        old_name = folder.name
+        self._push_undo(f"rename folder '{old_name}'",
+                        lambda: storage.rename_folder(game, profile, name, old_name))
         self._reload_slots(self._current_slot_name(), select_folder=name)
         self._notify(f"Renamed folder to '{name}'.")
 
     def _on_delete_folder(self, folder: storage.SaveFolder) -> None:
         game, profile = self.game_combo.currentText(), self.profile_combo.currentText()
+        path = storage.SAVES_DIR / game / profile / folder.name
+        count = len(folder.slots)
+        if count and not self._confirm(
+                "delete", "Delete folder",
+                f"Delete folder '{folder.name}' and the {count} slot(s) in it?\n\n"
+                "You can undo this with Ctrl+Z."):
+            return
+        self._flush_notes()
+        self._flush_video()
+        self._current_slot = None
         try:
-            storage.delete_empty_folder(game, profile, folder.name)
+            stash = storage.stash_for_undo(path)
+            try:
+                storage.delete_folder(game, profile, folder.name)
+            except Exception:
+                storage.discard_stash(stash)
+                raise
         except (ValueError, OSError) as e:
             self._notify(str(e))
             return
+        self._push_undo(f"delete folder '{folder.name}'",
+                        lambda: storage.restore_stash(stash, path))
         self._collapsed.discard(self._folder_key(folder.name))
         self._reload_slots()
         self._notify(f"Deleted folder '{folder.name}'.")
@@ -1427,10 +1548,12 @@ class MainWindow(QMainWindow):
         if before in names:  # dropped onto one of the dragged slots
             before = ""
         moved, failed = 0, []
+        moves: list[tuple[str, str, str]] = []
         for slot in slots:
             if slot.folder == folder:
                 continue
             old_path = slot.path
+            old_folder = slot.folder
             try:
                 storage.move_slot_to_folder(slot, folder)
             except (ValueError, OSError) as e:
@@ -1439,12 +1562,18 @@ class MainWindow(QMainWindow):
                 failed.append(f"'{slot.name}': {e}")
                 continue
             moved += 1
+            moves.append((slot.name, old_folder, folder))
             # Practice Mode keeps its own copy of the slot, which has just changed location.
             if self._guard_slot is not None and self._guard_slot.path == old_path:
                 self._guard_slot.path = slot.path
                 self._guard_slot.folder = slot.folder
         if folder:
             self._collapsed.discard(self._folder_key(folder))
+        if moves:
+            def undo_move(items=tuple(moves)) -> None:
+                for name, src_folder, dst_folder in items:
+                    storage.move_slot_by_name(game, profile, name, dst_folder, src_folder)
+            self._push_undo("move" if len(moves) == 1 else f"move {len(moves)} slots", undo_move)
         if self._config.slot_sort == "custom" and before:
             self._place_in_custom_order([s.name for s in slots if s.folder == folder],
                                         folder, before, after)

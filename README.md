@@ -103,9 +103,15 @@ Once copied in, open the app (or switch to a different game and back). Your prof
 
 ## Folders
 
-Click **+ Folder** above the slot list to create a folder in the current profile. Drag a slot onto a folder to file it there, or drag it onto a top-level slot (or use **Remove from folder** in its right-click menu) to take it out. To move several slots at once, select them with Ctrl-click or Shift-click and drag them together, or right-click the selection and use **Move to folder**. Load, Replace, Delete and the other single-slot actions need exactly one slot selected. Double-click a folder to collapse or expand it (a single click only highlights it), and right-click it to rename it or delete it once it is empty. A folder only groups slots, so it can't be loaded into the game.
+Click **+ Folder** above the slot list to create a folder in the current profile. Drag a slot onto a folder to file it there, or drag it onto a top-level slot (or use **Remove from folder** in its right-click menu) to take it out. To move several slots at once, select them with Ctrl-click or Shift-click and drag them together, or right-click the selection and use **Move to folder**. Load, Replace, Delete and the other single-slot actions need exactly one slot selected. Double-click a folder to collapse or expand it (a single click only highlights it), and right-click it to rename or delete it. A folder only groups slots, so it can't be loaded into the game.
 
 On disk a folder is a directory inside the profile that contains a hidden `.fromsave_folder` file, so slots from other save managers are never mistaken for folders. Slot and folder names are unique within a profile.
+
+## Keyboard shortcuts
+
+With the slot list focused: **F2** renames the selected slot or folder, **Delete** deletes the selected slot(s) or folder (a folder with slots in it asks first). **Ctrl+Z**, only while the FromSave window is active, undoes the last import, rename, move, new folder or delete (up to 20 steps). Load, Replace and Practice Mode are not covered; the game's save is protected by the automatic backups instead.
+
+Importing follows the layout other save managers use: for a game saved as a folder, the slot contains that save folder under its real name; for a single save file, the slot contains a copy of that file. The type is detected from what is actually at the save path, so a wrongly chosen save type no longer makes import fail.
 
 ## Practice Mode
 
