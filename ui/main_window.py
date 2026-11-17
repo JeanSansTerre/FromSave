@@ -718,7 +718,7 @@ class MainWindow(QMainWindow):
             return  # switching game disables practice mode separately
         try:
             storage.load_save(slot, game_cfg, make_backup=False)
-        except OSError as e:
+        except Exception as e:
             logger.exception("Practice Mode: failed to switch slot: slot=%r", slot.name)
             self._notify(f"Practice Mode: failed to switch — {e}")
             return
@@ -874,7 +874,7 @@ class MainWindow(QMainWindow):
             if guard_cfg is not None:
                 try:
                     storage.restore_practice_start(guard_cfg)
-                except OSError as e:
+                except Exception as e:
                     logger.exception("Practice Mode: failed to restore pre-practice save: game=%r", guard_cfg.name)
                     self._sync_ro_button()
                     self._notify(f"Practice mode off — restore failed: {e}")
@@ -932,7 +932,7 @@ class MainWindow(QMainWindow):
         try:
             storage.snapshot_practice_start(self._guard_cfg)
             storage.load_save(self._guard_slot, self._guard_cfg, make_backup=False)
-        except OSError as e:
+        except Exception as e:  # not only OSError: a bad save path raises ValueError
             logger.exception("Practice Mode: failed to apply slot on activate: slot=%r", slot.name)
             self._guard_slot = None
             self._guard_cfg = None
@@ -1017,7 +1017,7 @@ class MainWindow(QMainWindow):
             storage.load_save(self._guard_slot, self._guard_cfg, make_backup=False)
             self._guard_quiet_until = time.monotonic() + 1.5
             self._notify(f"Practice Mode: the game tried to save — restored '{self._guard_slot.name}'.", 4000)
-        except OSError as e:
+        except Exception as e:
             logger.exception("Lock restore failed: slot=%r path=%s", self._guard_slot.name, path)
             self._notify(f"Lock: restore failed — {e}")
         self._guard_watcher.addPath(path)
