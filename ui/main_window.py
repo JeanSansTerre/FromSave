@@ -7,10 +7,13 @@ from pathlib import Path
 from typing import Callable, Optional, Union
 
 from PySide6.QtCore import (
-    QEvent, QFileSystemWatcher, QPropertyAnimation, QSignalBlocker, QSize, Qt, QTimer, QUrl,
-    Signal,
+    QEvent, QFileSystemWatcher, QPoint, QPropertyAnimation, QSignalBlocker, QSize, Qt, QTimer,
+    QUrl, Signal,
 )
-from PySide6.QtGui import QDesktopServices, QIcon, QKeySequence, QShortcut
+from PySide6.QtGui import (
+    QColor, QDesktopServices, QDrag, QFontMetrics, QIcon, QKeySequence, QPainter, QPen, QPixmap,
+    QShortcut,
+)
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QDialog, QFileDialog, QFrame, QHBoxLayout,
     QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu,
@@ -342,6 +345,9 @@ class MainWindow(QMainWindow):
         self.slot_list.setDropIndicatorShown(True)
         self.slot_list.setDragDropMode(QAbstractItemView.InternalMove)
         self.slot_list.entries_dropped.connect(self._on_entries_dropped)
+        self.slot_list.is_folder_row = lambda r: (
+            0 <= r < len(self._rows) and isinstance(self._rows[r], storage.SaveFolder))
+        self.slot_list.drop_target_changed.connect(self._on_drop_target_changed)
         self.slot_list.currentRowChanged.connect(self._on_slot_selected)
         self.slot_list.itemSelectionChanged.connect(self._sync_ro_button)
         self.slot_list.itemDoubleClicked.connect(self._on_item_double_clicked)
@@ -1691,6 +1697,23 @@ class MainWindow(QMainWindow):
         container[:] = rest[:index] + moving + rest[index:]
         storage.save_tree_order(game, profile, folders, loose)
 
+    def _on_drop_target_changed(self, row: int, where: str) -> None:
+        """While dragging, say in the status bar where the saves would land."""
+        if row == -2:
+            self.status_bar.clearMessage()
+            return
+        n = len(self._selected_slots())
+        noun = f"{n} save" if n == 1 else f"{n} saves"
+        target = self._rows[row] if 0 <= row < len(self._rows) else None
+        if isinstance(target, storage.SaveFolder):
+            text = f"Drop to move {noun} into folder '{target.name}'"
+        elif isinstance(target, storage.SaveSlot):
+            place = f"folder '{target.folder}'" if target.folder else "the top level"
+            text = f"Drop to place {noun} next to '{target.name}' in {place}"
+        else:
+            text = f"Drop here to take {noun} out of any folder"
+        self.status_bar.showMessage(text)
+
     def _on_entries_dropped(self, source_rows: list, target_row: int, where: str) -> None:
         """Rows were dragged onto another: onto a folder files the slots there, onto a
         slot puts them in that slot's folder (or the top level). Folders are never moved."""
@@ -2189,14 +2212,20 @@ class _SlotListWidget(QListWidget):
     # dragged rows, target row (-1 when dropped on empty space),
     # "on" / "above" / "below" / "viewport"
     entries_dropped = Signal(list, int, str)
+    # Where a drag currently points: (row, where); (-2, "") when the drag ends or leaves.
+    drop_target_changed = Signal(int, str)
 
-    def dropEvent(self, event) -> None:
-        rows = sorted(self.row(item) for item in self.selectedItems())
-        if not rows:
-            event.ignore()
-            return
-        item = self.itemAt(event.position().toPoint())
-        target_row = self.row(item) if item is not None else -1
+    _GOLD = QColor(184, 150, 46)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._hover: tuple[int, str] = (-2, "")
+        # Set by the window: tells whether a row is a folder (those are dropped *into*).
+        self.is_folder_row: Callable[[int], bool] = lambda row: False
+
+    def _drop_position(self, pos) -> tuple[int, str]:
+        item = self.itemAt(pos)
+        row = self.row(item) if item is not None else -1
         indicator = self.dropIndicatorPosition()
         if indicator == QAbstractItemView.DropIndicatorPosition.OnItem:
             where = "on"
@@ -2206,6 +2235,87 @@ class _SlotListWidget(QListWidget):
             where = "below"
         else:
             where = "viewport"
+        return row, where
+
+    def _set_hover(self, hover: tuple[int, str]) -> None:
+        if hover != self._hover:
+            self._hover = hover
+            self.viewport().update()
+            self.drop_target_changed.emit(*hover)
+
+    def startDrag(self, supportedActions) -> None:
+        """Drag with a small label ("3 saves") instead of a picture of every row, so the
+        rows under the cursor stay visible."""
+        items = self.selectedItems()
+        if not items:
+            return
+        text = items[0].text().strip() if len(items) == 1 else f"{len(items)} saves"
+        fm = QFontMetrics(self.font())
+        text = fm.elidedText(text, Qt.ElideRight, 220)
+        pad_x, pad_y, off = 10, 4, 16  # the transparent margin keeps the label off the cursor
+        w, h = fm.horizontalAdvance(text) + 2 * pad_x, fm.height() + 2 * pad_y
+        pix = QPixmap(w + off, h + off)
+        pix.fill(Qt.transparent)
+        painter = QPainter(pix)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setBrush(QColor(41, 41, 87, 235))
+        painter.setPen(QPen(self._GOLD, 1.5))
+        painter.drawRoundedRect(off, off, w - 1, h - 1, 6, 6)
+        painter.setPen(QColor(232, 226, 216))
+        painter.drawText(off + pad_x, off + pad_y + fm.ascent(), text)
+        painter.end()
+        try:
+            mime = self.mimeData(items)
+        except Exception:  # never lose dragging altogether over the cosmetic label
+            super().startDrag(supportedActions)
+            return
+        drag = QDrag(self)
+        drag.setMimeData(mime)
+        drag.setPixmap(pix)
+        drag.setHotSpot(QPoint(0, 0))
+        drag.exec(Qt.MoveAction, Qt.MoveAction)
+        self._set_hover((-2, ""))
+
+    def dragMoveEvent(self, event) -> None:
+        super().dragMoveEvent(event)
+        self._set_hover(self._drop_position(event.position().toPoint()))
+
+    def dragLeaveEvent(self, event) -> None:
+        super().dragLeaveEvent(event)
+        self._set_hover((-2, ""))
+
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)
+        row, where = self._hover
+        if row == -2:
+            return
+        painter = QPainter(self.viewport())
+        gold = self._GOLD
+        if row < 0:  # empty space: the saves go to the top level
+            painter.setPen(QPen(gold, 2))
+            painter.drawRect(self.viewport().rect().adjusted(1, 1, -2, -2))
+        else:
+            rect = self.visualItemRect(self.item(row))
+            if where == "on" and self.is_folder_row(row):
+                fill = QColor(gold)
+                fill.setAlpha(70)
+                painter.setBrush(fill)
+                painter.setPen(QPen(gold, 2))
+                painter.drawRoundedRect(rect.adjusted(1, 1, -2, -2), 4, 4)
+            else:  # dropping next to a slot: a line where the saves will land
+                y = rect.bottom() if where == "below" else rect.top()
+                painter.setPen(QPen(gold, 3))
+                painter.drawLine(rect.left() + 2, y, rect.right() - 2, y)
+        painter.end()
+
+    def dropEvent(self, event) -> None:
+        rows = sorted(self.row(item) for item in self.selectedItems())
+        if not rows:
+            event.ignore()
+            self._set_hover((-2, ""))
+            return
+        target_row, where = self._drop_position(event.position().toPoint())
+        self._set_hover((-2, ""))
         # Not handled by Qt, so it can't remove or duplicate the dragged rows.
         event.ignore()
         self.entries_dropped.emit(rows, target_row, where)
