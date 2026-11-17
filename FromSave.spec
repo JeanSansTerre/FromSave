@@ -5,6 +5,11 @@ import sys
 from PyInstaller.utils.hooks import collect_all
 
 datas = [('fromsave.ico', '.')]
+# The predefined games (saves/<Game>/game.json). The app copies this folder out next to
+# the executable the first time it starts (see app_paths.migrate_from_bundle).
+import glob
+for _cfg in sorted(glob.glob(os.path.join('saves', '*', 'game.json'))):
+    datas.append((_cfg, os.path.dirname(_cfg)))
 binaries = []
 hiddenimports = ['PySide6.QtMultimedia']
 
