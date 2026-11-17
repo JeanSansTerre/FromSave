@@ -111,6 +111,13 @@ QPushButton#ghostBtn:checked {
   color: #b8962e;
 }
 
+/* A button that can't be used right now looks clearly dimmed. */
+QPushButton:disabled {
+  background: #18181c;
+  border-color: #26262c;
+  color: #4a4a58;
+}
+
 /* ── Labels ── */
 QLabel {
   background-color: transparent;

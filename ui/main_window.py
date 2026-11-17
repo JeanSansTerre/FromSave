@@ -1,4 +1,6 @@
 import logging
+import os
+import time
 import shutil
 from datetime import datetime
 from pathlib import Path
@@ -91,6 +93,7 @@ class MainWindow(QMainWindow):
         self._video_save_timer.setInterval(600)
         self._video_save_timer.timeout.connect(self._flush_video)
 
+        self._guard_quiet_until = 0.0
         self._guard_watcher = QFileSystemWatcher(self)
         self._guard_watcher.fileChanged.connect(self._on_guarded_file_changed)
         self._guard_slot: Optional[storage.SaveSlot] = None
@@ -323,6 +326,7 @@ class MainWindow(QMainWindow):
         self.slot_list.setDragDropMode(QAbstractItemView.InternalMove)
         self.slot_list.entries_dropped.connect(self._on_entries_dropped)
         self.slot_list.currentRowChanged.connect(self._on_slot_selected)
+        self.slot_list.itemSelectionChanged.connect(self._sync_ro_button)
         self.slot_list.itemDoubleClicked.connect(self._on_item_double_clicked)
         self.slot_list.setContextMenuPolicy(Qt.CustomContextMenu)
         self.slot_list.customContextMenuRequested.connect(self._on_slot_context_menu)
@@ -470,6 +474,11 @@ class MainWindow(QMainWindow):
         self.ro_btn.setObjectName("ghostBtn")
         self.ro_btn.setCheckable(True)
         self.ro_btn.setEnabled(False)
+        self.ro_btn.setToolTip(
+            "Practice Mode: loads the selected save into the game and keeps it there.\n"
+            "Whenever the game saves, the app puts the save back. Turn it off to get\n"
+            "your original game save back. Needs one save selected."
+        )
         self.ro_btn.toggled.connect(self._on_ro_toggled)
         bar.addWidget(self.ro_btn)
 
@@ -709,7 +718,8 @@ class MainWindow(QMainWindow):
             self._notify(f"Practice Mode: failed to switch — {e}")
             return
         self._guard_slot = slot
-        self._notify(f"Practice mode now protecting '{slot.name}'.")
+        self._guard_quiet_until = time.monotonic() + 1.5
+        self._notify(f"Practice Mode now protecting '{slot.name}' (loaded into the game).", 5000)
 
     def _clear_detail(self) -> None:
         self._current_slot = None
@@ -824,7 +834,9 @@ class MainWindow(QMainWindow):
     def _sync_ro_button(self) -> None:
         """Show Practice Mode's on/off state; it can always be turned off, whatever is selected."""
         is_active = self._guard_slot is not None
-        save_files = storage.slot_save_files(self._current_slot) if self._current_slot else []
+        # Use what is actually selected: the 'current' row stays set after clicking empty space.
+        selected = self._selected_slot()
+        save_files = storage.slot_save_files(selected) if selected else []
         if is_active:
             self.info_ro_status.set_value("Active")
         elif save_files:
@@ -867,9 +879,11 @@ class MainWindow(QMainWindow):
             self._notify(f"'{label}' — practice mode is off — save restored.")
             return
 
-        if not self._current_slot or self._multi_selected():
+        slot = self._selected_slot()
+        if slot is None:
             self._sync_ro_button()
-            self._notify(self._no_slot_text())
+            self._notify("Practice Mode needs one save selected first." if not self._multi_selected()
+                         else "Practice Mode works on one save at a time — select a single save.")
             return
         warning_shown = False
         if not self._config.protect_warning_acknowledged and not self._protect_warning_shown:
@@ -898,35 +912,36 @@ class MainWindow(QMainWindow):
                                  disable_key="confirm_lock_slot"):
                 self._sync_ro_button()
                 return
-        save_files = storage.slot_save_files(self._current_slot)
+        save_files = storage.slot_save_files(slot)
         if not save_files:
             self._sync_ro_button()
+            self._notify(f"'{slot.name}' has no save file to practice with.")
             return
         game_cfg = self._get_game_cfg()
         if not game_cfg:
             self._sync_ro_button()
             return
 
-        self._guard_slot = self._current_slot
+        self._guard_slot = slot
         self._guard_cfg = game_cfg
         try:
             storage.snapshot_practice_start(self._guard_cfg)
             storage.load_save(self._guard_slot, self._guard_cfg, make_backup=False)
         except OSError as e:
-            logger.exception("Practice Mode: failed to apply slot on activate: slot=%r", self._current_slot.name)
+            logger.exception("Practice Mode: failed to apply slot on activate: slot=%r", slot.name)
             self._guard_slot = None
             self._guard_cfg = None
             self._sync_ro_button()
             self._notify(f"Practice Mode: failed to apply — {e}")
             return
+        self._guard_quiet_until = time.monotonic() + 1.5  # ignore our own write just above
         live_paths = [str(f) for f in _live_game_files(game_cfg)]
         if live_paths:
             self._guard_watcher.addPaths(live_paths)
 
-        n = len(save_files)
-        label = save_files[0].name if n == 1 else f"{n} files"
         self._sync_ro_button()
-        self._notify(f"'{label}' — practice mode is on.")
+        self._notify(f"Practice Mode ON — '{slot.name}' is loaded and protected. "
+                     "Anything the game saves is undone until you turn it off.", 6000)
 
     def _show_protect_warning(self) -> bool:
         """Show the one-time Practice Mode warning. Returns whether the user confirmed."""
@@ -976,17 +991,27 @@ class MainWindow(QMainWindow):
     def _on_guarded_file_changed(self, path: str) -> None:
         if self._guard_slot is None or self._guard_cfg is None:
             return
+        if time.monotonic() < self._guard_quiet_until:
+            # That change was our own load, not the game saving. Keep watching the file.
+            QTimer.singleShot(700, lambda: self._rewatch(path))
+            return
         # Stop watching so our own restore doesn't retrigger this, and give the
         # game time to finish writing before restoring.
         self._guard_watcher.removePath(path)
         QTimer.singleShot(500, lambda: self._do_guard_restore(path))
+
+    def _rewatch(self, path: str) -> None:
+        if self._guard_slot is not None and os.path.exists(path) \
+                and path not in self._guard_watcher.files():
+            self._guard_watcher.addPath(path)
 
     def _do_guard_restore(self, path: str) -> None:
         if self._guard_slot is None or self._guard_cfg is None:
             return
         try:
             storage.load_save(self._guard_slot, self._guard_cfg, make_backup=False)
-            self._notify(f"Protected: restored '{self._guard_slot.name}'.", 4000)
+            self._guard_quiet_until = time.monotonic() + 1.5
+            self._notify(f"Practice Mode: the game tried to save — restored '{self._guard_slot.name}'.", 4000)
         except OSError as e:
             logger.exception("Lock restore failed: slot=%r path=%s", self._guard_slot.name, path)
             self._notify(f"Lock: restore failed — {e}")
