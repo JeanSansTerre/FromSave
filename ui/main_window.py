@@ -466,8 +466,8 @@ class MainWindow(QMainWindow):
         self.delete_btn.clicked.connect(self._on_delete_slot)
 
         bar.addWidget(self.import_btn)
-        bar.addWidget(self.replace_btn)
         bar.addWidget(self.load_btn)
+        bar.addWidget(self.replace_btn)
         bar.addWidget(self.delete_btn)
         bar.addStretch()
 
