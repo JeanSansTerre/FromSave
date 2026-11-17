@@ -291,6 +291,17 @@ class MainWindow(QMainWindow):
         self.add_folder_btn.setToolTip("Create a folder to group slots in this profile")
         self.add_folder_btn.clicked.connect(self._on_add_folder)
         header.addWidget(self.add_folder_btn)
+
+        # Next to +Folder, on the side that has spare room, so the sort controls keep theirs.
+        self.refresh_btn = QPushButton()
+        self.refresh_btn.setObjectName("ghostBtn")
+        self.refresh_btn.setIcon(QIcon(str(_UI_DIR / "refresh.svg")))
+        self.refresh_btn.setIconSize(QSize(16, 16))
+        self.refresh_btn.setFixedWidth(36)
+        self.refresh_btn.setProperty("iconOnly", True)
+        self.refresh_btn.setToolTip("Refresh from disk (Ctrl+R)\nPicks up changes made in Explorer")
+        self.refresh_btn.clicked.connect(self._on_refresh)
+        header.addWidget(self.refresh_btn)
         header.addStretch()
 
         sort_label = QLabel("Sort by")
@@ -342,6 +353,9 @@ class MainWindow(QMainWindow):
             sc = QShortcut(QKeySequence(key), self.slot_list)
             sc.setContext(Qt.WidgetShortcut)
             sc.activated.connect(handler)
+        refresh_sc = QShortcut(QKeySequence("Ctrl+R"), self)
+        refresh_sc.setContext(Qt.WindowShortcut)
+        refresh_sc.activated.connect(self._on_refresh)
         undo_sc = QShortcut(QKeySequence("Ctrl+Z"), self)
         undo_sc.setContext(Qt.WindowShortcut)
         undo_sc.activated.connect(self._undo_last)
@@ -540,6 +554,17 @@ class MainWindow(QMainWindow):
         off (which also restores the pre-practice save)."""
         if self.ro_btn.isChecked():
             self.ro_btn.setChecked(False)
+
+    def _on_refresh(self) -> None:
+        """Re-read profiles and slots from disk, keeping the current profile and selection."""
+        self._flush_notes()
+        self._flush_video()
+        keep = self._current_slot_name()
+        self._reload_profiles(select=self.profile_combo.currentText())
+        self._update_save_path_info()
+        self._reload_slots(keep)
+        count = sum(1 for r in self._rows if isinstance(r, storage.SaveSlot))
+        self._notify(f"Refreshed — {count} slot(s).", 3000)
 
     def _on_game_changed(self, _: int) -> None:
         self._disable_practice_mode_for_context_switch()

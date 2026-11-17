@@ -106,6 +106,8 @@ Once copied in, open the app (or switch to a different game and back). Your prof
 
 Click **+ Folder** above the slot list to create a folder in the current profile. Drag a slot onto a folder to file it there, or drag it onto a top-level slot (or use **Remove from folder** in its right-click menu) to take it out. To move several slots at once, select them with Ctrl-click or Shift-click and drag them together, or right-click the selection and use **Move to folder**. Load, Replace, Delete and the other single-slot actions need exactly one slot selected. Double-click a folder to collapse or expand it (a single click only highlights it), and right-click it to rename or delete it. A folder only groups slots, so it can't be loaded into the game.
 
+The circular-arrow button next to **+ Folder** (or **Ctrl+R**) re-reads the profiles and slots from disk, so changes made in Explorer show up without restarting.
+
 On disk a folder is a directory inside the profile that contains a hidden `.fromsave_folder` file. Folders you create in Explorer, or copy in from other save managers, are recognised too: a directory that only holds saves (or nothing yet) is treated as a folder, and a directory that holds a save itself is a slot. The app then adds the hidden marker file to it. This relies on the game's save path being set in Settings. Slot and folder names are unique within a profile.
 
 ## Keyboard shortcuts
