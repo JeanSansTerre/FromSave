@@ -642,7 +642,12 @@ class MainWindow(QMainWindow):
         return [e for e in self._rows if isinstance(e, storage.SaveSlot)]
 
     def _selected_entry(self) -> Optional[Union[storage.SaveFolder, storage.SaveSlot]]:
-        row = self.slot_list.currentRow()
+        """The single selected row. The list's 'current' row is not enough: it stays set
+        after the selection is cleared (click on empty space, Ctrl-click to deselect)."""
+        items = self.slot_list.selectedItems()
+        if len(items) != 1:
+            return None
+        row = self.slot_list.row(items[0])
         return self._rows[row] if 0 <= row < len(self._rows) else None
 
     def _selected_slots(self) -> list[storage.SaveSlot]:
