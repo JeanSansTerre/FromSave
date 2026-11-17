@@ -263,8 +263,69 @@ def slot_save_files(slot: SaveSlot) -> list[Path]:
     return [f for f in slot.path.iterdir() if _is_save_file(f)]
 
 
+def _live_names(game: str) -> tuple[str, set[str]]:
+    """The game's save type and the file names its live save(s) have."""
+    data = _read_json_dict(SAVES_DIR / game / _GAME_CONFIG)
+    paths = [data.get("save_path", "")] + list(data.get("save_paths", []))
+    return data.get("save_mode", "file"), {Path(p).name for p in paths if p}
+
+
+def _looks_like_group(path: Path) -> bool:
+    """Whether an unmarked directory in a profile is a group of slots rather than one slot.
+
+    Folders made in Explorer or by other save managers carry no marker, so this goes by
+    what is inside and by the game's save type. A directory that holds a save itself is
+    a slot; one that only holds slots (or nothing yet) is a folder.
+    """
+    if (path / "meta.json").exists() or (path / "notes.txt").exists() \
+            or (path / _LEGACY_DATA_DIR).is_dir():
+        return False
+    try:
+        kids = [c for c in path.iterdir()
+                if c.name not in _RESERVED and not c.name.startswith(".")]
+    except OSError:
+        return False
+    if not kids:
+        return True  # an empty directory is a new folder
+    files = [k for k in kids if k.is_file()]
+    dirs = [k for k in kids if k.is_dir()]
+    mode, live_names = _live_names(path.parent.parent.name)
+    if any(d.name in live_names for d in dirs):
+        return False  # a slot that stores the save folder under its own name
+    if mode == "folder" or (mode != "files" and not live_names):
+        # Folder games, or games whose save type isn't known yet.
+        if files:
+            return False  # loose files: a slot mirroring the save folder itself
+        # A slot holds the save directory, which holds files; a folder holds slots instead.
+        try:
+            return not any(any(_is_save_file(x) for x in d.iterdir()) for d in dirs)
+        except OSError:
+            return False
+    # Single-file games: a slot holds the game's own file, never sub-directories.
+    if any(f.name in live_names for f in files):
+        return False
+    if files and not live_names:
+        return False  # no way to tell, so keep treating it as a slot
+    return True
+
+
 def _is_folder_dir(path: Path) -> bool:
-    return path.is_dir() and (path / _FOLDER_MARKER).exists()
+    if not path.is_dir():
+        return False
+    if (path / _FOLDER_MARKER).exists():
+        return True
+    # Unmarked directories directly inside a profile may still be folders.
+    return path.parent.parent.parent == SAVES_DIR and _looks_like_group(path)
+
+
+def _adopt_folder(path: Path) -> None:
+    """Mark a detected folder so it stays a folder whatever it ends up containing."""
+    marker = path / _FOLDER_MARKER
+    if not marker.exists():
+        try:
+            marker.write_text("", encoding="utf-8")
+        except OSError:
+            logger.warning("Could not mark folder: %s", path)
 
 
 def _read_folder_slots(folder_dir: Path, game: str, profile: str) -> list[SaveSlot]:
@@ -286,6 +347,7 @@ def load_slots(game: str, profile: str) -> list[SaveSlot]:
     slots = []
     for entry in sorted(profile_dir.iterdir()):
         if entry.is_dir() and _is_folder_dir(entry):
+            _adopt_folder(entry)
             slots.extend(_read_folder_slots(entry, game, profile))
         elif slot := _read_entry(entry, game, profile):
             slots.append(slot)
@@ -328,6 +390,7 @@ def load_profile_tree(game: str, profile: str, sort: str,
         return folders, loose
     for entry in sorted(profile_dir.iterdir()):
         if entry.is_dir() and _is_folder_dir(entry):
+            _adopt_folder(entry)
             folders.append(SaveFolder(entry.name, entry, _read_folder_slots(entry, game, profile)))
         elif slot := _read_entry(entry, game, profile):
             loose.append(slot)

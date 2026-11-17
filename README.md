@@ -106,7 +106,7 @@ Once copied in, open the app (or switch to a different game and back). Your prof
 
 Click **+ Folder** above the slot list to create a folder in the current profile. Drag a slot onto a folder to file it there, or drag it onto a top-level slot (or use **Remove from folder** in its right-click menu) to take it out. To move several slots at once, select them with Ctrl-click or Shift-click and drag them together, or right-click the selection and use **Move to folder**. Load, Replace, Delete and the other single-slot actions need exactly one slot selected. Double-click a folder to collapse or expand it (a single click only highlights it), and right-click it to rename or delete it. A folder only groups slots, so it can't be loaded into the game.
 
-On disk a folder is a directory inside the profile that contains a hidden `.fromsave_folder` file, so slots from other save managers are never mistaken for folders. Slot and folder names are unique within a profile.
+On disk a folder is a directory inside the profile that contains a hidden `.fromsave_folder` file. Folders you create in Explorer, or copy in from other save managers, are recognised too: a directory that only holds saves (or nothing yet) is treated as a folder, and a directory that holds a save itself is a slot. The app then adds the hidden marker file to it. This relies on the game's save path being set in Settings. Slot and folder names are unique within a profile.
 
 ## Keyboard shortcuts
 
@@ -174,6 +174,8 @@ A separate **Overlay** can be shown over the game (default hotkey: **Insert**) w
 The details panel (slot name, notes, video link, and game info) is hidden by default so the slot list can use the whole window. Tick **Settings > Behaviour > Show details panel** to bring it back next to the slot list. Notes and video links are stored in a slot's `notes.txt` and `meta.json`.
 
 ## Checking for updates
+
+Updates are fetched from the GitHub **Releases** of `JeanSansTerre/fromsave` (a release needs the `FromSave.zip` / `FromSave-linux.zip` file attached, and a version tag higher than the one in `version.py`). Committing code to the repository alone does not make an update available.
 
 FromSave can check GitHub for newer releases and update itself in place.
 

@@ -23,7 +23,7 @@ from version import __version__
 
 logger = logging.getLogger(__name__)
 
-REPO = "JacksonW98/fromsave"
+REPO = "JeanSansTerre/fromsave"
 API_URL = f"https://api.github.com/repos/{REPO}/releases"
 ASSET_NAME_WINDOWS = "FromSave.zip"
 ASSET_NAME_LINUX = "FromSave-linux.zip"

@@ -4,13 +4,16 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional, Union
 
-from PySide6.QtCore import QEvent, QFileSystemWatcher, QSignalBlocker, QSize, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import (
+    QEvent, QFileSystemWatcher, QPropertyAnimation, QSignalBlocker, QSize, Qt, QTimer, QUrl,
+    Signal,
+)
 from PySide6.QtGui import QDesktopServices, QIcon, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QDialog, QFileDialog, QFrame, QHBoxLayout,
     QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu,
     QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy, QSplitter,
-    QStatusBar, QVBoxLayout, QWidget,
+    QGraphicsOpacityEffect, QStatusBar, QVBoxLayout, QWidget,
 )
 
 import config
@@ -162,9 +165,16 @@ class MainWindow(QMainWindow):
         self._flash_label = QLabel(root)
         self._flash_label.setAlignment(Qt.AlignCenter)
         self._flash_label.hide()
-        self._flash_timer = QTimer(self)
-        self._flash_timer.setSingleShot(True)
-        self._flash_timer.timeout.connect(self._flash_label.hide)
+        self._flash_fx = QGraphicsOpacityEffect(self._flash_label)
+        self._flash_label.setGraphicsEffect(self._flash_fx)
+        # Quick fade in, hold, fade out: 1.5 s in total.
+        self._flash_anim = QPropertyAnimation(self._flash_fx, b"opacity", self)
+        self._flash_anim.setDuration(1500)
+        self._flash_anim.setKeyValueAt(0.0, 0.0)
+        self._flash_anim.setKeyValueAt(0.1, 1.0)
+        self._flash_anim.setKeyValueAt(0.75, 1.0)
+        self._flash_anim.setKeyValueAt(1.0, 0.0)
+        self._flash_anim.finished.connect(self._flash_label.hide)
         outer = QVBoxLayout(root)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
@@ -808,10 +818,11 @@ class MainWindow(QMainWindow):
             "border-radius: 10px; padding: 14px 32px;")
         label.adjustSize()
         parent = label.parentWidget()
-        label.move((parent.width() - label.width()) // 2, max(12, parent.height() // 8))
+        label.move((parent.width() - label.width()) // 2, (parent.height() - label.height()) // 2)
         label.raise_()
         label.show()
-        self._flash_timer.start(1500)
+        self._flash_anim.stop()
+        self._flash_anim.start()
 
     def _notify(self, text: str, timeout: int = 0) -> None:
         """Show a status message, mirrored in the overlay while it's visible."""
