@@ -206,6 +206,12 @@ class MainWindow(QMainWindow):
         self.status_bar = QStatusBar()
         self.status_bar.setSizeGripEnabled(True)
         self.setStatusBar(self.status_bar)
+        # Stays visible for as long as Practice Mode is on (status messages fade away).
+        self._practice_label = QLabel()
+        self._practice_label.setStyleSheet(
+            "color: #d4b24a; font-weight: 600; padding: 0 10px; background: transparent;")
+        self._practice_label.hide()
+        self.status_bar.addPermanentWidget(self._practice_label)
         self.status_bar.showMessage("Ready.")
 
     def _build_top_bar(self) -> QHBoxLayout:
@@ -852,6 +858,13 @@ class MainWindow(QMainWindow):
             self.ro_btn.setChecked(is_active)
         self.ro_btn.setText(self._ro_btn_text(is_active))
         self.ro_btn.setEnabled(is_active or bool(save_files))
+        label = getattr(self, "_practice_label", None)
+        if label is not None:
+            if is_active:
+                label.setText(f"● Practice Mode ON — protecting '{self._guard_slot.name}'")
+                label.show()
+            else:
+                label.hide()
 
     def _on_ro_toggled(self, checked: bool) -> None:
         if self._confirm_dialog is not None and self._confirm_action == "lock":
@@ -889,6 +902,10 @@ class MainWindow(QMainWindow):
             self._sync_ro_button()
             self._notify("Practice Mode needs one save selected first." if not self._multi_selected()
                          else "Practice Mode works on one save at a time — select a single save.")
+            return
+        game_cfg = self._get_game_cfg()
+        if not game_cfg or not self._validate_game_save_path(game_cfg):
+            self._sync_ro_button()  # the reason (e.g. save path not set) is in the status bar
             return
         warning_shown = False
         if not self._config.protect_warning_acknowledged and not self._protect_warning_shown:
@@ -1220,6 +1237,7 @@ class MainWindow(QMainWindow):
         # Practice Mode now protects the slot that was just loaded.
         if self._guard_cfg is not None and self._guard_cfg.name == cfg.name:
             self._guard_slot = slot
+            self._sync_ro_button()
 
         self._notify(f"Loaded '{slot.name}' to game save.")
         self._flash("Load Successful", "#2e9e5b")
