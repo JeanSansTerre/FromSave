@@ -480,9 +480,10 @@ class MainWindow(QMainWindow):
         self.load_btn = QPushButton(_btn_text("Load Save", self._config.hotkey_load))
         self.load_btn.clicked.connect(self._on_load_save)
 
-        self.delete_btn = QPushButton("Delete slot")
+        self.delete_btn = QPushButton("Delete")
         self.delete_btn.setObjectName("dangerBtn")
-        self.delete_btn.clicked.connect(self._on_delete_slot)
+        self.delete_btn.setToolTip("Delete the selected save(s) or folder (Del)")
+        self.delete_btn.clicked.connect(self._delete_selected)
 
         bar.addWidget(self.import_btn)
         bar.addWidget(self.load_btn)
@@ -1104,6 +1105,8 @@ class MainWindow(QMainWindow):
             self._delete_many(slots)
         elif slots:
             self._on_delete_slot()
+        else:
+            self._notify("Nothing selected to delete.")
 
     def _delete_many(self, slots: list[storage.SaveSlot]) -> None:
         soft = self._config.soft_delete
