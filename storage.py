@@ -21,6 +21,7 @@ _RESERVED = {"meta.json", "notes.txt"}
 _LEGACY_DATA_DIR = "save_data"
 # Hidden file that marks a directory inside a profile as an organising folder rather
 # than a save slot. Slots from other save managers never have it, so they stay slots.
+_SLOT_MARKER = ".fromsave_slot"  # hidden: this directory is one save slot, never a folder
 _FOLDER_MARKER = ".fromsave_folder"
 _GAME_CONFIG = "game.json"
 _BACKUPS_DIR = "_backups"
@@ -269,6 +270,25 @@ def _live_names(game: str) -> tuple[str, set[str]]:
     return data.get("save_mode", "file"), {Path(p).name for p in paths if p}
 
 
+def _min_file_depth(root: Path) -> Optional[int]:
+    """How deep the shallowest save file is under root (1 = directly inside), None if none."""
+    level, depth = [root], 0
+    while level and depth < 12:
+        depth += 1
+        nxt: list[Path] = []
+        for d in level:
+            try:
+                for c in d.iterdir():
+                    if _is_save_file(c):
+                        return depth
+                    if c.is_dir() and not c.name.startswith(".") and c.name not in _RESERVED:
+                        nxt.append(c)
+            except OSError:
+                continue
+        level = nxt
+    return None
+
+
 def _looks_like_group(path: Path) -> bool:
     """Whether an unmarked directory in a profile is a group of slots rather than one slot.
 
@@ -277,7 +297,7 @@ def _looks_like_group(path: Path) -> bool:
     a slot; one that only holds slots (or nothing yet) is a folder.
     """
     if (path / "meta.json").exists() or (path / "notes.txt").exists() \
-            or (path / _LEGACY_DATA_DIR).is_dir():
+            or (path / _LEGACY_DATA_DIR).is_dir() or (path / _SLOT_MARKER).exists():
         return False
     try:
         kids = [c for c in path.iterdir()
@@ -291,8 +311,16 @@ def _looks_like_group(path: Path) -> bool:
     mode, live_names = _live_names(path.parent.parent.name)
     if any(d.name in live_names for d in dirs):
         return False  # a slot that stores the save folder under its own name
+    if mode == "folder":
+        # A slot mirrors the save folder, so its files sit exactly as deep as the live
+        # save's do; a folder of slots holds them one level deeper.
+        save_path = _read_json_dict(SAVES_DIR / path.parent.parent.name / _GAME_CONFIG).get("save_path", "")
+        live_depth = _min_file_depth(Path(save_path)) if save_path else None
+        here = _min_file_depth(path)
+        if live_depth and here:
+            return here > live_depth
     if mode == "folder" or (mode != "files" and not live_names):
-        # Folder games, or games whose save type isn't known yet.
+        # Folder games without a usable live save, or games whose save type isn't known yet.
         if files:
             return False  # loose files: a slot mirroring the save folder itself
         # A slot holds the save directory, which holds files; a folder holds slots instead.
@@ -311,10 +339,27 @@ def _looks_like_group(path: Path) -> bool:
 def _is_folder_dir(path: Path) -> bool:
     if not path.is_dir():
         return False
-    if (path / _FOLDER_MARKER).exists():
+    marker = path / _FOLDER_MARKER
+    if marker.exists():
+        if path.parent.parent.parent == SAVES_DIR and _marker_is_auto(marker):
+            # Marked by the app's own guess, not by the user: check the guess still holds.
+            if _looks_like_group(path):
+                return True
+            try:
+                marker.unlink()
+            except OSError:
+                pass
+            return False
         return True
     # Unmarked directories directly inside a profile may still be folders.
     return path.parent.parent.parent == SAVES_DIR and _looks_like_group(path)
+
+
+def _marker_is_auto(marker: Path) -> bool:
+    try:
+        return marker.read_text(encoding="utf-8").strip() == "auto"
+    except OSError:
+        return False
 
 
 def _adopt_folder(path: Path) -> None:
@@ -322,7 +367,7 @@ def _adopt_folder(path: Path) -> None:
     marker = path / _FOLDER_MARKER
     if not marker.exists():
         try:
-            marker.write_text("", encoding="utf-8")
+            marker.write_text("auto", encoding="utf-8")
         except OSError:
             logger.warning("Could not mark folder: %s", path)
 
@@ -908,6 +953,11 @@ def import_save(game: str, profile: str, slot_name: str, game_cfg: GameConfig) -
         shutil.rmtree(slot_dir, ignore_errors=True)  # don't leave an empty slot behind
         raise
     # The slot holds only the game's own save, like slots made by other save managers.
+    # A hidden marker keeps it a slot however deep the game's save folders go.
+    try:
+        (slot_dir / _SLOT_MARKER).write_text("", encoding="utf-8")
+    except OSError:
+        logger.warning("Could not mark slot: %s", slot_dir)
     return _read_slot(slot_dir, game, profile)
 
 

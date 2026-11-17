@@ -108,7 +108,7 @@ Click **+ Folder** above the slot list to create a folder in the current profile
 
 The circular-arrow button next to **+ Folder** (or **Ctrl+R**) re-reads the profiles and slots from disk, so changes made in Explorer show up without restarting.
 
-On disk a folder is a directory inside the profile that contains a hidden `.fromsave_folder` file. Folders you create in Explorer, or copy in from other save managers, are recognised too: a directory that only holds saves (or nothing yet) is treated as a folder, and a directory that holds a save itself is a slot. The app then adds the hidden marker file to it. This relies on the game's save path being set in Settings. Slot and folder names are unique within a profile.
+On disk a folder is a directory inside the profile that contains a hidden `.fromsave_folder` file. Folders you create in Explorer, or copy in from other save managers, are recognised too: a directory that only holds saves (or nothing yet) is treated as a folder, and a directory that holds a save itself is a slot. The app then adds a hidden marker file to it. For folder games the app compares how deep the files sit with the live save at your save path (a slot is as deep as the live save, a folder of slots one level deeper), so this relies on the game's save path being set in Settings. Slots created by Import carry a hidden `.fromsave_slot` file so they are never mistaken for folders. Slot and folder names are unique within a profile.
 
 ## Keyboard shortcuts
 
