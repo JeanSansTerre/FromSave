@@ -24,7 +24,6 @@ _LEGACY_DATA_DIR = "save_data"
 _FOLDER_MARKER = ".fromsave_folder"
 _GAME_CONFIG = "game.json"
 _BACKUPS_DIR = "_backups"
-_RUN_BACKUPS_DIR = "_run_backups"
 _PRACTICE_START_DIR = "_practice_start"
 _UNDO_DIR = "_undo"
 _MAX_BACKUPS = 3
@@ -947,10 +946,6 @@ def load_save(slot: SaveSlot, game_cfg: GameConfig, *, make_backup: bool = True)
         _copy_file(slot.path, Path(game_cfg.save_path))
         return
     _copy_to_live(slot.path, game_cfg, slot.save_file)
-
-
-def take_run_backup(game_cfg: GameConfig) -> None:
-    _rotating_backup(game_cfg, _RUN_BACKUPS_DIR)
 
 
 def _rotating_backup(game_cfg: GameConfig, dir_name: str) -> None:

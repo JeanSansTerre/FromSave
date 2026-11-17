@@ -128,15 +128,6 @@ To save progress normally again, disable Practice Mode before saving in-game. Wh
 
 > **Note:** Practice Mode may not work correctly on all games, since it depends on how each game handles its save files.
 
-## Run Mode
-
-Run Mode is designed for active playthroughs where you want safety backups without accidentally losing your current save. When enabled:
-
-- **Load Save** and **Practice Mode** are both disabled, so the game save can't be overwritten while you're playing.
-- The app automatically takes a rolling backup of the game's save file every 2 minutes (to `saves/_run_backups/<Game Name>/<timestamp>/`), keeping the last 3 backups.
-
-Toggle **Run Mode** on before starting a serious run and off when you're done. The backups are separate from your named slots and are not visible in the slot list. They're there in case the game corrupts or deletes your save mid-session.
-
 ## Backups
 
 The app creates a few kinds of automatic backups. They all live inside the `saves` folder next to your named slots, but don't show up in the slot list. Unless noted otherwise, they're only there for you to restore by hand.
@@ -145,9 +136,8 @@ The app creates a few kinds of automatic backups. They all live inside the `save
 |------------------------|-----------------------------------------------|-------------------------------------------------------------------------------|-----------------------------------------|-------------------------------------|
 | Load Save backup       | `saves/_backups/<Game Name>/<timestamp>/`     | Every time you click **Load Save**, right before the live save is overwritten | Last 3                                  | No                                  |
 | Practice Mode snapshot | `saves/_practice_start/<Game Name>/`          | Once, when Practice Mode is enabled                                           | 1 (overwritten each time you enable it) | Yes, when Practice Mode is disabled |
-| Run Mode backup        | `saves/_run_backups/<Game Name>/<timestamp>/` | Every 2 minutes while Run Mode is on                                          | Last 3                                  | No                                  |
 
-To recover from a `_backups` or `_run_backups` snapshot, open the relevant timestamped folder and copy the save file(s) back to the game's save location by hand.
+To recover from a `_backups` snapshot, open the relevant timestamped folder and copy the save file(s) back to the game's save location by hand.
 
 ## Hotkeys & overlay
 

@@ -91,11 +91,6 @@ class MainWindow(QMainWindow):
         self._video_save_timer.setInterval(600)
         self._video_save_timer.timeout.connect(self._flush_video)
 
-        self._run_mode = False
-        self._run_backup_timer = QTimer(self)
-        self._run_backup_timer.setInterval(2 * 60 * 1000)
-        self._run_backup_timer.timeout.connect(self._on_run_backup_tick)
-
         self._guard_watcher = QFileSystemWatcher(self)
         self._guard_watcher.fileChanged.connect(self._on_guarded_file_changed)
         self._guard_slot: Optional[storage.SaveSlot] = None
@@ -478,16 +473,6 @@ class MainWindow(QMainWindow):
         self.ro_btn.toggled.connect(self._on_ro_toggled)
         bar.addWidget(self.ro_btn)
 
-        self.run_mode_btn = QPushButton("Run Mode")
-        self.run_mode_btn.setObjectName("ghostBtn")
-        self.run_mode_btn.setCheckable(True)
-        self.run_mode_btn.setToolTip(
-            "Disables Load Save and Practice Mode to protect the game save,\n"
-            "and takes a rolling backup every 2 minutes (keeps last 3)."
-        )
-        self.run_mode_btn.toggled.connect(self._on_run_mode_toggled)
-        bar.addWidget(self.run_mode_btn)
-
         return bar
 
     # Data loading
@@ -849,7 +834,7 @@ class MainWindow(QMainWindow):
         with QSignalBlocker(self.ro_btn):
             self.ro_btn.setChecked(is_active)
         self.ro_btn.setText(self._ro_btn_text(is_active))
-        self.ro_btn.setEnabled(not self._run_mode and (is_active or bool(save_files)))
+        self.ro_btn.setEnabled(is_active or bool(save_files))
 
     def _on_ro_toggled(self, checked: bool) -> None:
         if self._confirm_dialog is not None and self._confirm_action == "lock":
@@ -882,9 +867,9 @@ class MainWindow(QMainWindow):
             self._notify(f"'{label}' — practice mode is off — save restored.")
             return
 
-        if self._run_mode:
+        if not self._current_slot or self._multi_selected():
             self._sync_ro_button()
-            self._notify("Run mode is on — disable it before using Practice Mode.")
+            self._notify(self._no_slot_text())
             return
         warning_shown = False
         if not self._config.protect_warning_acknowledged and not self._protect_warning_shown:
@@ -913,10 +898,6 @@ class MainWindow(QMainWindow):
                                  disable_key="confirm_lock_slot"):
                 self._sync_ro_button()
                 return
-        if not self._current_slot or self._multi_selected():
-            self._sync_ro_button()
-            self._notify(self._no_slot_text())
-            return
         save_files = storage.slot_save_files(self._current_slot)
         if not save_files:
             self._sync_ro_button()
@@ -1191,9 +1172,6 @@ class MainWindow(QMainWindow):
         self._flash("Replace Successful", "#d9822b")
 
     def _on_load_save(self) -> None:
-        if self._run_mode:
-            self._notify("Run mode is on — disable it before loading a save.")
-            return
         slot = self._selected_slot()
         if slot is None:
             self._notify(self._no_slot_text())
@@ -1718,34 +1696,6 @@ class MainWindow(QMainWindow):
             suffix = f" as '{new_name}'." if new_name != slot.name else "."
             self.status_bar.showMessage(f"Copied '{slot.name}' to profile '{target_profile}'{suffix}")
 
-    def _on_run_mode_toggled(self, on: bool) -> None:
-        self._run_mode = on
-        self.load_btn.setEnabled(not on)
-        if on:
-            if self.ro_btn.isChecked():
-                self.ro_btn.setChecked(False)
-            self._sync_ro_button()
-            self._run_backup_timer.start()
-            self._on_run_backup_tick()
-            self.status_bar.showMessage(
-                "Run mode on — load and lock disabled, backing up every 2 min.", 5000
-            )
-        else:
-            self._run_backup_timer.stop()
-            self._sync_ro_button()
-            self.status_bar.showMessage("Run mode off.", 3000)
-
-    def _on_run_backup_tick(self) -> None:
-        cfg = self._get_game_cfg()
-        if not cfg:
-            return
-        try:
-            storage.take_run_backup(cfg)
-            self.status_bar.showMessage("Run backup saved.", 2000)
-        except Exception as e:
-            logger.exception("Run backup failed: game=%r", cfg.name)
-            self.status_bar.showMessage(f"Run backup failed: {e}", 3000)
-
     def show_first_run_dialog(self) -> None:
         dlg = QDialog(self)
         dlg.setWindowTitle("No settings found")
@@ -2059,7 +2009,6 @@ class MainWindow(QMainWindow):
                     self.game_combo.currentText(),
                     self.profile_combo.currentText(),
                     self._current_slot_name())
-        self._run_backup_timer.stop()
         self._global_hotkeys.stop()
         self._overlay_toggle_hotkey.stop()
         self._overlay_action_hotkeys.stop()
